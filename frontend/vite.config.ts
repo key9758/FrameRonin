@@ -1,9 +1,22 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { copyFileSync } from 'fs'
+import { join } from 'path'
+
+// 构建后复制 index.html 为 404.html，供 EdgeOne 等平台 SPA 回退
+function copy404Plugin() {
+  return {
+    name: 'copy-404',
+    closeBundle() {
+      const outDir = join(process.cwd(), 'dist')
+      copyFileSync(join(outDir, 'index.html'), join(outDir, '404.html'))
+    },
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), copy404Plugin()],
   base: process.env.GITHUB_ACTIONS ? '/FrameRonin/' : '/',
   server: {
     port: 5173,
