@@ -8,6 +8,7 @@ const { Text } = Typography
 const GEM_V2_URL = 'https://gemini.google.com/gem/1ex8XOSNJzjAND6Ujz9aKFKbIyqzcvTCv?usp=sharing'
 const GEM_V3_URL = 'https://gemini.google.com/gem/1hAu-pMGYI34Bp_ttYHrRIGljhjbmoFjZ?usp=sharing'
 const GEM_CHAR_V23OT_URL = 'https://gemini.google.com/gem/194dFaRUI2l4kFnLEVzmwIvVYTDgFmGvj?usp=sharing'
+const GEM_SCENE_URL = 'https://gemini.google.com/gem/1a83JP082OIliUQZN5SsBguMOrYm4g6P2?usp=sharing'
 const GEM_ILLUST_URL = 'https://gemini.google.com/gem/1IUuJXgHTTbMEgv5D_G0HXSHXxYdcfTZg?usp=sharing'
 
 export type AppMode = 'video' | 'image' | 'gif' | 'spritesheet' | 'spriteadjust' | 'pixelate' | 'expandshrink' | 'matte' | null
@@ -134,7 +135,36 @@ export default function ModeSelector({ onSelect }: Props) {
       </Row>
       {isConnected && (
         <Row gutter={24} style={{ marginTop: 8, marginBottom: 24 }}>
-          <Col xs={24} md={12}>
+          <Col xs={24} md={8}>
+            <a
+              href={GEM_SCENE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}
+              title={t('moduleNanobananaScene')}
+            >
+              <Card
+                hoverable
+                styles={{ body: { padding: '16px 24px' } }}
+                style={{
+                  textAlign: 'center',
+                  cursor: 'pointer',
+                  borderColor: '#9a8b78',
+                  background: 'linear-gradient(135deg, #ede6dc 0%, #e8dfd4 100%)',
+                  borderWidth: 2,
+                }}
+              >
+                <ThunderboltOutlined style={{ fontSize: 36, color: '#b55233', marginBottom: 12 }} />
+                <div style={{ lineHeight: 1.4 }}>
+                  <Text strong style={{ fontSize: 15 }}>{t('moduleNanobananaScene')}</Text>
+                </div>
+                <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12, lineHeight: 1.4 }}>
+                  {t('moduleNanobananaSceneDesc')}
+                </Text>
+              </Card>
+            </a>
+          </Col>
+          <Col xs={24} md={8}>
             <a
               href={GEM_ILLUST_URL}
               target="_blank"
@@ -163,7 +193,7 @@ export default function ModeSelector({ onSelect }: Props) {
               </Card>
             </a>
           </Col>
-          <Col xs={24} md={12}>
+          <Col xs={24} md={8}>
             <Card
               hoverable
               onClick={() => onSelect('spriteadjust')}

@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { Button, message, Slider, Space, Tabs, Typography, Upload } from 'antd'
-import { DownloadOutlined, FileImageOutlined, PictureOutlined } from '@ant-design/icons'
+import { Button, InputNumber, message, Slider, Space, Tabs, Typography, Upload } from 'antd'
+import { CaretLeftOutlined, CaretRightOutlined, DownloadOutlined, FileImageOutlined, PictureOutlined, MergeCellsOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd'
 import { parseGIF, decompressFrames } from 'gifuct-js'
 // @ts-expect-error gifenc has no types
 import { GIFEncoder, quantize, applyPalette } from 'gifenc'
 import JSZip from 'jszip'
 import { useLanguage } from '../i18n/context'
+import CropPreview from './CropPreview'
 import StashableImage from './StashableImage'
 import StashDropZone from './StashDropZone'
 
@@ -62,7 +63,7 @@ function compositeFrame(
 
 export default function GifFrameConverter() {
   const { t } = useLanguage()
-  const [activeTab, setActiveTab] = useState<'gif2frames' | 'frames2gif'>('gif2frames')
+  const [activeTab, setActiveTab] = useState<'gif2frames' | 'frames2gif' | 'images2single'>('gif2frames')
   const [gifFile, setGifFile] = useState<File | null>(null)
   const [gifPreviewUrl, setGifPreviewUrl] = useState<string | null>(null)
   const [frameFiles, setFrameFiles] = useState<File[]>([])
@@ -72,6 +73,17 @@ export default function GifFrameConverter() {
   const [framesZipUrl, setFramesZipUrl] = useState<string | null>(null)
   const [extractedFrameUrls, setExtractedFrameUrls] = useState<string[]>([])
   const [gifUrl, setGifUrl] = useState<string | null>(null)
+
+  const [combineFiles, setCombineFiles] = useState<File[]>([])
+  const [combineInputUrls, setCombineInputUrls] = useState<string[]>([])
+  const [combineCols, setCombineCols] = useState(4)
+  const [combinedUrl, setCombinedUrl] = useState<string | null>(null)
+  const [cropTop, setCropTop] = useState(0)
+  const [cropBottom, setCropBottom] = useState(0)
+  const [cropLeft, setCropLeft] = useState(0)
+  const [cropRight, setCropRight] = useState(0)
+  const [cropPreviewIndex, setCropPreviewIndex] = useState(0)
+  const [firstImageSize, setFirstImageSize] = useState<{ w: number; h: number } | null>(null)
 
   const revokeExtractedPreviews = () => {
     setExtractedFrameUrls((urls) => {
@@ -96,6 +108,90 @@ export default function GifFrameConverter() {
     setFrameInputUrls(urls)
     return () => urls.forEach(URL.revokeObjectURL)
   }, [frameFiles])
+
+  useEffect(() => {
+    const urls = combineFiles.map((f) => URL.createObjectURL(f))
+    setCombineInputUrls(urls)
+    return () => urls.forEach(URL.revokeObjectURL)
+  }, [combineFiles])
+
+  useEffect(() => {
+    if (combineFiles.length === 0) {
+      setFirstImageSize(null)
+      setCropPreviewIndex(0)
+    } else {
+      setCropPreviewIndex((i) => Math.min(i, combineFiles.length - 1))
+    }
+  }, [combineFiles.length])
+
+  const runImagesToSingle = async () => {
+    if (combineFiles.length === 0) return
+    setLoading(true)
+    setCombinedUrl((old) => {
+      if (old) URL.revokeObjectURL(old)
+      return null
+    })
+    try {
+      const imgs: HTMLImageElement[] = []
+      const top = Math.max(0, cropTop)
+      const bottom = Math.max(0, cropBottom)
+      const left = Math.max(0, cropLeft)
+      const right = Math.max(0, cropRight)
+      let maxW = 0
+      let maxH = 0
+      for (const f of combineFiles) {
+        const url = URL.createObjectURL(f)
+        const img = await new Promise<HTMLImageElement>((res, rej) => {
+          const i = new Image()
+          i.onload = () => res(i)
+          i.onerror = () => rej(new Error('load'))
+          i.src = url
+        })
+        URL.revokeObjectURL(url)
+        const sw = Math.max(1, img.naturalWidth - left - right)
+        const sh = Math.max(1, img.naturalHeight - top - bottom)
+        maxW = Math.max(maxW, sw)
+        maxH = Math.max(maxH, sh)
+        imgs.push(img)
+      }
+      const cols = Math.max(1, Math.floor(combineCols))
+      const rows = Math.ceil(imgs.length / cols)
+      const outW = cols * maxW
+      const outH = rows * maxH
+      const canvas = document.createElement('canvas')
+      canvas.width = outW
+      canvas.height = outH
+      const ctx = canvas.getContext('2d')!
+      // 不填充背景，保持透明
+      for (let i = 0; i < imgs.length; i++) {
+        const img = imgs[i]!
+        const sw = Math.max(1, img.naturalWidth - left - right)
+        const sh = Math.max(1, img.naturalHeight - top - bottom)
+        const r = Math.floor(i / cols)
+        const c = i % cols
+        const dx = c * maxW + (maxW - sw) / 2
+        const dy = r * maxH + (maxH - sh) / 2
+        ctx.drawImage(img, left, top, sw, sh, dx, dy, sw, sh)
+      }
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('canvas'))), 'image/png')
+      })
+      setCombinedUrl(URL.createObjectURL(blob))
+      message.success(t('imagesToSingleSuccess'))
+    } catch (e) {
+      message.error(t('imagesToSingleFailed') + ': ' + String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const downloadCombined = () => {
+    if (!combinedUrl) return
+    const a = document.createElement('a')
+    a.href = combinedUrl
+    a.download = 'combined.png'
+    a.click()
+  }
 
   const runGifToFrames = async () => {
     if (!gifFile) return
@@ -251,7 +347,7 @@ export default function GifFrameConverter() {
     <Space direction="vertical" size="large" style={{ width: '100%', paddingTop: 8 }}>
       <Tabs
         activeKey={activeTab}
-        onChange={(k) => setActiveTab(k as 'gif2frames' | 'frames2gif')}
+        onChange={(k) => setActiveTab(k as 'gif2frames' | 'frames2gif' | 'images2single')}
         items={[
           {
             key: 'gif2frames',
@@ -434,6 +530,157 @@ export default function GifFrameConverter() {
                         src={gifUrl}
                         alt={t('imgPreview')}
                         style={{ maxWidth: '100%', maxHeight: 320, display: 'block', imageRendering: 'auto' }}
+                      />
+                    </div>
+                  </>
+                )}
+              </>
+            ),
+          },
+          {
+            key: 'images2single',
+            label: (
+              <span>
+                <MergeCellsOutlined /> {t('imagesToSingle')}
+              </span>
+            ),
+            children: (
+              <>
+                <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>{t('imagesToSingleHint')}</Text>
+                <Space wrap align="center" style={{ marginBottom: 12 }}>
+                  <Text type="secondary">{t('imagesToSingleCols')}:</Text>
+                  <InputNumber min={1} max={64} value={combineCols} onChange={(v) => setCombineCols(v ?? 4)} style={{ width: 72 }} />
+                </Space>
+                {combineFiles.length > 0 && combineInputUrls.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>{t('imagesToSingleCropHint')}</Text>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<CaretLeftOutlined />}
+                            disabled={combineFiles.length <= 1 || cropPreviewIndex <= 0}
+                            onClick={() => setCropPreviewIndex((i) => Math.max(0, i - 1))}
+                          />
+                          <CropPreview
+                            key={cropPreviewIndex}
+                            imageUrl={combineInputUrls[cropPreviewIndex]!}
+                            cropTop={cropTop}
+                            cropBottom={cropBottom}
+                            cropLeft={cropLeft}
+                            cropRight={cropRight}
+                            onChange={({ top, bottom, left, right }) => {
+                              setCropTop(top)
+                              setCropBottom(bottom)
+                              setCropLeft(left)
+                              setCropRight(right)
+                            }}
+                            onImageSize={cropPreviewIndex === 0 ? (w, h) => setFirstImageSize({ w, h }) : undefined}
+                            loadingText={t('cropPreviewLoading')}
+                          />
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<CaretRightOutlined />}
+                            disabled={combineFiles.length <= 1 || cropPreviewIndex >= combineFiles.length - 1}
+                            onClick={() => setCropPreviewIndex((i) => Math.min(combineFiles.length - 1, i + 1))}
+                          />
+                        </div>
+                        {combineFiles.length > 1 && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {t('imagesToSingleCropPreviewN', { current: cropPreviewIndex + 1, total: combineFiles.length })}
+                          </Text>
+                        )}
+                      </div>
+                      <div style={{ alignSelf: 'center', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <Space wrap align="center">
+                          <InputNumber min={0} value={cropTop} onChange={(v) => setCropTop(v ?? 0)} style={{ width: 64 }} addonBefore={t('batchCropTop')} />
+                          <InputNumber min={0} value={cropBottom} onChange={(v) => setCropBottom(v ?? 0)} style={{ width: 64 }} addonBefore={t('batchCropBottom')} />
+                          <InputNumber min={0} value={cropLeft} onChange={(v) => setCropLeft(v ?? 0)} style={{ width: 64 }} addonBefore={t('batchCropLeft')} />
+                          <InputNumber min={0} value={cropRight} onChange={(v) => setCropRight(v ?? 0)} style={{ width: 64 }} addonBefore={t('batchCropRight')} />
+                        </Space>
+                        {firstImageSize && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {t('imagesToSingleCropRemaining', {
+                              w: Math.max(0, firstImageSize.w - cropLeft - cropRight),
+                              h: Math.max(0, firstImageSize.h - cropTop - cropBottom),
+                            })}
+                          </Text>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <StashDropZone onStashDrop={(f) => setCombineFiles((prev) => [...prev, f])}>
+                  <Dragger
+                    accept={IMAGE_ACCEPT.join(',')}
+                    multiple
+                    fileList={combineFiles.map((f, i) => ({ uid: `c-${i}`, name: f.name } as UploadFile))}
+                    beforeUpload={(f) => {
+                      setCombineFiles((prev) => [...prev, f])
+                      return false
+                    }}
+                    onRemove={(file) => {
+                      const idx = combineFiles.findIndex((_, i) => `c-${i}` === file.uid)
+                      if (idx >= 0) setCombineFiles((prev) => prev.filter((_, i) => i !== idx))
+                    }}
+                  >
+                    <p className="ant-upload-text">{t('framesUploadHint')}</p>
+                  </Dragger>
+                </StashDropZone>
+                {combineInputUrls.length > 0 && (
+                  <>
+                    <Text strong style={{ display: 'block', marginTop: 16, marginBottom: 8 }}>{t('imgOriginalPreview')}</Text>
+                    <div
+                      style={{
+                        padding: 16,
+                        background: 'repeating-conic-gradient(#c9bfb0 0% 25%, #e4dbcf 0% 50%) 50% / 16px 16px',
+                        borderRadius: 8,
+                        border: '1px solid #9a8b78',
+                        display: 'inline-block',
+                      }}
+                    >
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, maxHeight: 200, overflow: 'auto' }}>
+                        {combineInputUrls.map((url, i) => (
+                          <StashableImage
+                            key={i}
+                            src={url}
+                            alt={`${t('frame')} ${i + 1}`}
+                            style={{ maxWidth: 80, maxHeight: 80, objectFit: 'contain', border: '1px solid rgba(0,0,0,0.1)' }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+                <Space style={{ marginTop: 16 }}>
+                  <Button type="primary" loading={loading} onClick={runImagesToSingle} disabled={combineFiles.length === 0}>
+                    {loading ? t('imagesToSingleCombining') : t('imagesToSingleCombine')}
+                  </Button>
+                  {combinedUrl && (
+                    <Button icon={<DownloadOutlined />} onClick={downloadCombined}>
+                      {t('imagesToSingleDownload')}
+                    </Button>
+                  )}
+                </Space>
+                {combinedUrl && (
+                  <>
+                    <Text strong style={{ display: 'block', marginTop: 24, marginBottom: 8 }}>{t('imgPreview')}</Text>
+                    <div
+                      style={{
+                        padding: 16,
+                        background: 'repeating-conic-gradient(#c9bfb0 0% 25%, #e4dbcf 0% 50%) 50% / 16px 16px',
+                        borderRadius: 8,
+                        border: '1px solid #9a8b78',
+                        display: 'inline-block',
+                      }}
+                    >
+                      <StashableImage
+                        src={combinedUrl}
+                        alt={t('imgPreview')}
+                        style={{ maxWidth: '100%', maxHeight: 400, display: 'block', imageRendering: 'pixelated' }}
                       />
                     </div>
                   </>
