@@ -2,6 +2,9 @@
   "name": "frontend",
   "private": true,
   "version": "2.2",
+  "overrides": {
+    "elliptic": "6.6.1"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
