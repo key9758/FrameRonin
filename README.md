@@ -1,15 +1,28 @@
-# FrameRonin - 视频转序列帧图片生成器 v1.6
+# FrameRonin - 视频转序列帧 · 抠图 · Sprite Sheet v2.1
 
-上传视频后自动提取帧、抠图处理，生成完整的序列帧表（Sprite Sheet）图片。
+像素图片与序列帧处理工具集，支持视频拆帧、GIF 处理、图片抠图、Sprite Sheet 合成等。
 
-## 功能
+## 功能模块
 
-- **上传视频**：支持 MP4 / MOV / WebM / AVI / MKV（≤200MB）
-- **帧提取**：按 FPS、起止时间、最大帧数采样
-- **抠图分割**：rembg(U2Net) 主体分割，透明背景
-- **后处理**：统一尺寸、裁剪、边距、间距
-- **序列帧合成**：固定列数或自适应布局
-- **预览与下载**：PNG、ZIP（含索引 JSON）
+### 视频与序列帧
+- **视频转序列帧**：上传视频，提取帧、rembg 抠图、生成 Sprite Sheet
+- **GIF ↔ 序列帧**：GIF 拆帧、序列帧转 GIF、多图合成单图、单图拆分、简易拼接（上下/左右）
+- **Sprite Sheet**：拆分序列帧图 / 合成 GIF
+- **Sprite Sheet 调整**：分割预览、勾选帧、动画预览（需 Ronin 登录）
+
+### 图片处理
+- **像素图片处理**：缩放、内描边、裁切、抠图（绿幕/蓝幕）
+  - **RPGMAKER 一键处理**：去 Gemini 水印 → 左上角抠图(容差 80/羽化 5) → 144×144 硬缩放 → RPGMAKER 生成
+  - **RPGMAKER 生成**：3 行切分、第 2 行翻转复制、第 3 行下移 48px
+- **色度键抠图**：绿幕/蓝幕去背、抑色、边缘平滑
+- **图片像素化**：转换为像素块风格
+- **扩图与缩图**：按 N×M 格子裁切后合并
+- **Gemini 水印去除**：去除 Gemini 生成图片的可见水印
+
+### nanobanana 系列（需 Ronin 登录）
+- **nanobanana RPG Maker 角色素材生成**：链接 Gemini 生成 RPG Maker 角色素材
+- **nanobanana 像素场景生成**、**立绘生成**：链接 Gemini
+- **nanob 全人物动作生成测试**：连生动作 V4Tx3 等
 
 ## 环境要求
 
@@ -28,7 +41,7 @@
 pip install -r backend/requirements.txt
 
 # 前端
-cd frontend && npm install antd @ant-design/icons axios
+cd frontend && npm install
 ```
 
 ### 2. 启动 Redis
@@ -58,9 +71,9 @@ cd frontend && npm run dev
 
 访问 http://localhost:5173
 
-### 4. rembg 首次运行
+### 4. rembg / U2Net（仅后端）
 
-首次抠图时会下载 U2Net 模型（约 176MB），请保持网络畅通。
+当前「视频转序列帧」前端使用色度键抠图，无需下载模型。若部署后端 + Worker 并调用 `/jobs` 接口进行服务端抠图，首次运行时会下载 U2Net 模型（约 176MB），请保持网络畅通。
 
 ## GitHub Pages 预览（分享给朋友）
 
@@ -74,7 +87,7 @@ cd frontend && npm run dev
 
 **访问地址：** https://systemchester.github.io/FrameRonin/
 
-> 说明：当前部署的是纯前端。「视频转序列帧」依赖后端 API，在 Pages 上无法使用；「像素图片处理」可完全在浏览器内使用。
+> 说明：当前部署的是纯前端。GIF 拆帧/合成、像素图片处理、色度键抠图、简易拼接、Sprite Sheet、RPGMAKER 一键处理、视频转序列帧等均可使用。
 
 ## Docker 部署
 
