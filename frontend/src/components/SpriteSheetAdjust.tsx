@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { Checkbox, ColorPicker, InputNumber, Segmented, Slider, Space, Typography, Upload } from 'antd'
+import React, { forwardRef, useEffect, useRef, useState } from 'react'
+import { Checkbox, ColorPicker, InputNumber, Progress, Segmented, Slider, Space, Typography, Upload } from 'antd'
 import { ArrowDownOutlined, ArrowLeftOutlined, ArrowRightOutlined, ArrowUpOutlined, MinusOutlined, PlusOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd'
 import { useLanguage } from '../i18n/context'
@@ -13,15 +13,7 @@ const IMAGE_MAX_MB = 20
 
 type FrameOffset = { dx: number; dy: number }
 
-function ShiftedFrameCanvas({
-  src,
-  dx,
-  dy,
-  displayWidth,
-  displayHeight,
-  onSize,
-  style,
-}: {
+const ShiftedFrameCanvas = forwardRef<HTMLCanvasElement | null, {
   src: string
   dx: number
   dy: number
@@ -29,8 +21,21 @@ function ShiftedFrameCanvas({
   displayHeight?: number
   onSize?: (w: number, h: number) => void
   style?: React.CSSProperties
-}) {
+}>(function ShiftedFrameCanvas({
+  src,
+  dx,
+  dy,
+  displayWidth,
+  displayHeight,
+  onSize,
+  style,
+}, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const innerRef = (el: HTMLCanvasElement | null) => {
+    (canvasRef as React.MutableRefObject<HTMLCanvasElement | null>).current = el
+    if (typeof ref === 'function') ref(el)
+    else if (ref) ref.current = el
+  }
 
   useEffect(() => {
     const img = new Image()
@@ -55,7 +60,7 @@ function ShiftedFrameCanvas({
 
   return (
     <canvas
-      ref={canvasRef}
+      ref={innerRef}
       style={{
         width: displayWidth ? `${displayWidth}px` : '100%',
         height: displayHeight ? `${displayHeight}px` : '100%',
@@ -70,7 +75,7 @@ function ShiftedFrameCanvas({
       }}
     />
   )
-}
+})
 
 function splitSpriteSheet(
   img: HTMLImageElement,
@@ -165,6 +170,14 @@ export default function SpriteSheetAdjust() {
   const [previewBg, setPreviewBg] = useState<'checkered' | string>('#e4dbcf')
   const [previewBgColor, setPreviewBgColor] = useState('#e4dbcf')
   const [frameOffsets, setFrameOffsets] = useState<FrameOffset[]>([])
+  const [fixedPixelMode, setFixedPixelMode] = useState(false)
+  const [fixedPixelRange, setFixedPixelRange] = useState(1)
+  type FixedPixelFix = { imgX: number; imgY: number; range: number; data: Uint8ClampedArray }
+  const [fixedPixelFixes, setFixedPixelFixes] = useState<FixedPixelFix[]>([])
+  const [mouseInPreview, setMouseInPreview] = useState(false)
+  const [previewMousePos, setPreviewMousePos] = useState<{ x: number; y: number } | null>(null)
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const previewContainerRef = useRef<HTMLDivElement | null>(null)
 
   type PressCountKey = 'up' | 'down' | 'left' | 'right'
   const [framePressCounts, setFramePressCounts] = useState<Record<PressCountKey, number>[]>([])
@@ -217,6 +230,12 @@ export default function SpriteSheetAdjust() {
         })
       })
       const resolved = await Promise.all(urls)
+      setPreviewImgSize(null)
+      setFrameOffsets([])
+      setFramePressCounts([])
+      setRecombinedUrl(null)
+      setFixedPixelMode(false)
+      setFixedPixelFixes([])
       setFrameUrls(resolved)
       setSelected(resolved.map((_, i) => i < 6))
       setCurrentIdx(0)
@@ -224,15 +243,9 @@ export default function SpriteSheetAdjust() {
     img.src = originalUrl
   }, [originalUrl, file, cols, rows])
 
-  useEffect(() => {
-    setPreviewImgSize(null)
-    setFrameOffsets([])
-    setFramePressCounts([])
-    setRecombinedUrl(null)
-  }, [frameUrls])
-
   const [recombinedUrl, setRecombinedUrl] = useState<string | null>(null)
   const [recombining, setRecombining] = useState(false)
+  const [applyProgress, setApplyProgress] = useState<number | null>(null)
 
   const handleRecombine = async () => {
     if (frameUrls.length === 0) return
@@ -244,6 +257,100 @@ export default function SpriteSheetAdjust() {
     } finally {
       setRecombining(false)
     }
+  }
+
+  const applyFixedPixels = async () => {
+    if (fixedPixelFixes.length === 0 || selectedIndices.length === 0) return
+    const frameW = previewImgSize?.w ?? 0
+    const frameH = previewImgSize?.h ?? 0
+    if (frameW <= 0 || frameH <= 0) return
+    setApplyProgress(0)
+    const newUrls: string[] = []
+    const total = frameUrls.length
+    try {
+    for (let i = 0; i < total; i++) {
+      if (!selected[i]) {
+        const resp = await fetch(frameUrls[i]!)
+        const blob = await resp.blob()
+        newUrls.push(URL.createObjectURL(blob))
+      } else {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const im = new Image()
+          im.onload = () => resolve(im)
+          im.onerror = () => reject(new Error('Failed to load frame'))
+          im.src = frameUrls[i]!
+        })
+        const c = document.createElement('canvas')
+        c.width = img.naturalWidth
+        c.height = img.naturalHeight
+        const ctx = c.getContext('2d')!
+        ctx.drawImage(img, 0, 0)
+        if (fixedPixelFixes.length > 0) {
+          const fullData = ctx.getImageData(0, 0, frameW, frameH)
+          const mask = new Uint8Array(frameW * frameH)
+          for (let fi = fixedPixelFixes.length - 1; fi >= 0; fi--) {
+            const fix = fixedPixelFixes[fi]!
+            const d = fix.data
+            for (let oy = 0; oy < fix.range; oy++) {
+              for (let ox = 0; ox < fix.range; ox++) {
+                const px = fix.imgX + ox
+                const py = fix.imgY + oy
+                if (mask[py * frameW + px]) continue
+                mask[py * frameW + px] = 1
+                const src = (oy * fix.range + ox) * 4
+                const dst = (py * frameW + px) * 4
+                fullData.data[dst] = d[src]!
+                fullData.data[dst + 1] = d[src + 1]!
+                fullData.data[dst + 2] = d[src + 2]!
+                fullData.data[dst + 3] = d[src + 3]!
+              }
+            }
+          }
+          ctx.putImageData(fullData, 0, 0)
+        }
+        const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png'))
+        if (blob) newUrls.push(URL.createObjectURL(blob))
+        else newUrls.push(frameUrls[i]!)
+      }
+      setApplyProgress(Math.round(((i + 1) / total) * 100))
+    }
+    setFrameUrls(newUrls)
+    setFixedPixelFixes([])
+    setFixedPixelMode(false)
+    } finally {
+      setApplyProgress(null)
+    }
+  }
+
+  const cancelFixedPixels = () => {
+    setFixedPixelFixes([])
+    setFixedPixelMode(false)
+  }
+
+  const handlePreviewClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!fixedPixelMode || !previewCanvasRef.current || !previewImgSize || !displayUrl) return
+    const canvas = previewCanvasRef.current
+    const rect = canvas.getBoundingClientRect()
+    const dx = frameOffsets[displayIdx]?.dx ?? 0
+    const dy = frameOffsets[displayIdx]?.dy ?? 0
+    const relX = (e.clientX - rect.left) / rect.width
+    const relY = (e.clientY - rect.top) / rect.height
+    const canvasX = Math.floor(relX * canvas.width)
+    const canvasY = Math.floor(relY * canvas.height)
+    const centerImgX = canvasX - dx
+    const centerImgY = canvasY - dy
+    const imgX = Math.max(0, Math.min(previewImgSize.w - fixedPixelRange, centerImgX - Math.floor(fixedPixelRange / 2)))
+    const imgY = Math.max(0, Math.min(previewImgSize.h - fixedPixelRange, centerImgY - Math.floor(fixedPixelRange / 2)))
+    const w = previewImgSize.w
+    const h = previewImgSize.h
+    if (imgX < 0 || imgY < 0 || imgX + fixedPixelRange > w || imgY + fixedPixelRange > h) return
+    const srcX = dx + imgX
+    const srcY = dy + imgY
+    if (srcX < 0 || srcY < 0 || srcX + fixedPixelRange > canvas.width || srcY + fixedPixelRange > canvas.height) return
+    try {
+      const imgData = canvas.getContext('2d')!.getImageData(srcX, srcY, fixedPixelRange, fixedPixelRange)
+      setFixedPixelFixes((prev) => [...prev, { imgX, imgY, range: fixedPixelRange, data: new Uint8ClampedArray(imgData.data) }])
+    } catch (_) {}
   }
 
   const selectedIndices = frameUrls.map((_, i) => i).filter((i) => selected[i])
@@ -656,37 +763,189 @@ export default function SpriteSheetAdjust() {
                       )}
                     </span>
                   </Space>
-                  <div
-                    className="sprite-adjust-anim-display"
-                    style={{
-                      padding: 16,
-                      background: previewBg === 'checkered'
-                        ? 'repeating-conic-gradient(#c9bfb0 0% 25%, #e4dbcf 0% 50%) 50% / 16px 16px'
-                        : previewBgColor,
-                      borderRadius: 8,
-                      border: '1px solid #9a8b78',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      width: '100%',
-                      maxWidth: 480,
-                      minHeight: 240,
-                      overflow: 'auto',
-                    }}
-                  >
-                    {displayUrl && (
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '100%', minHeight: '100%' }}>
-                        <ShiftedFrameCanvas
-                          src={displayUrl}
-                          dx={frameOffsets[displayIdx]?.dx ?? 0}
-                          dy={frameOffsets[displayIdx]?.dy ?? 0}
-                          displayWidth={previewImgSize ? previewImgSize.w * previewZoom : undefined}
-                          displayHeight={previewImgSize ? previewImgSize.h * previewZoom : undefined}
-                          onSize={(w, h) => setPreviewImgSize({ w, h })}
-                          style={{ display: 'block' }}
+                  <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                    <div
+                      ref={previewContainerRef}
+                      className="sprite-adjust-anim-display"
+                      style={{
+                        padding: 16,
+                        background: previewBg === 'checkered'
+                          ? 'repeating-conic-gradient(#c9bfb0 0% 25%, #e4dbcf 0% 50%) 50% / 16px 16px'
+                          : previewBgColor,
+                        borderRadius: 8,
+                        border: '1px solid #9a8b78',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: '100%',
+                        maxWidth: 480,
+                        minHeight: 240,
+                        overflow: 'auto',
+                        position: 'relative',
+                        cursor: fixedPixelMode ? 'crosshair' : undefined,
+                      }}
+                      onMouseEnter={() => setMouseInPreview(true)}
+                      onMouseLeave={() => { setMouseInPreview(false); setPreviewMousePos(null) }}
+                      onMouseMove={(e) => {
+                        if (!previewContainerRef.current) return
+                        const rect = previewContainerRef.current.getBoundingClientRect()
+                        setPreviewMousePos({ x: e.clientX - rect.left, y: e.clientY - rect.top })
+                      }}
+                      onClick={handlePreviewClick}
+                    >
+                      {displayUrl && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '100%', minHeight: '100%' }}>
+                          <div
+                            style={{
+                              position: 'relative',
+                              display: 'inline-block',
+                              width: previewImgSize ? previewImgSize.w * previewZoom : undefined,
+                              height: previewImgSize ? previewImgSize.h * previewZoom : undefined,
+                            }}
+                          >
+                            <ShiftedFrameCanvas
+                              ref={previewCanvasRef}
+                              src={displayUrl}
+                              dx={frameOffsets[displayIdx]?.dx ?? 0}
+                              dy={frameOffsets[displayIdx]?.dy ?? 0}
+                              displayWidth={previewImgSize ? previewImgSize.w * previewZoom : undefined}
+                              displayHeight={previewImgSize ? previewImgSize.h * previewZoom : undefined}
+                              onSize={(w, h) => setPreviewImgSize({ w, h })}
+                              style={{ display: 'block' }}
+                            />
+                            {fixedPixelFixes.map((fix, idx) => (
+                              <div
+                                key={idx}
+                                style={{
+                                  position: 'absolute',
+                                  left: fix.imgX * previewZoom,
+                                  top: fix.imgY * previewZoom,
+                                  width: fix.range * previewZoom,
+                                  height: fix.range * previewZoom,
+                                  backgroundColor: 'rgba(181,82,51,0.35)',
+                                  border: '2px solid #b55233',
+                                  boxSizing: 'border-box',
+                                  pointerEvents: 'none',
+                                }}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {fixedPixelMode && mouseInPreview && previewMousePos && previewImgSize && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            left: previewMousePos.x - (fixedPixelRange * previewZoom) / 2,
+                            top: previewMousePos.y - (fixedPixelRange * previewZoom) / 2,
+                            width: fixedPixelRange * previewZoom,
+                            height: fixedPixelRange * previewZoom,
+                            border: '2px solid #b55233',
+                            borderRadius: 2,
+                            pointerEvents: 'none',
+                            boxSizing: 'border-box',
+                          }}
                         />
-                      </div>
-                    )}
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 140 }}>
+                      {!fixedPixelMode ? (
+                        <button
+                          type="button"
+                          disabled={playing}
+                          onClick={() => { setPlaying(false); setFixedPixelMode(true) }}
+                          style={{
+                            padding: '8px 16px',
+                            border: '1px solid #9a8b78',
+                            borderRadius: 4,
+                            background: '#e4dbcf',
+                            color: '#3d3428',
+                            cursor: playing ? 'not-allowed' : 'pointer',
+                            fontSize: 13,
+                            fontWeight: 500,
+                            opacity: playing ? 0.6 : 1,
+                          }}
+                        >
+                          {t('spriteAdjustFixedPixel')}
+                        </button>
+                      ) : (
+                        <>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{t('spriteAdjustFixedPixelHint')}</Text>
+                          <div>
+                            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>{t('spriteAdjustFixedPixelRange')}</Text>
+                            <InputNumber
+                              min={1}
+                              max={8}
+                              value={fixedPixelRange}
+                              onChange={(v) => setFixedPixelRange(Math.max(1, Math.min(8, v ?? 1)))}
+                              style={{ width: 64 }}
+                            />
+                          </div>
+                          {fixedPixelFixes.length > 0 && (
+                            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                              <Space>
+                                <button
+                                  type="button"
+                                  disabled={applyProgress !== null}
+                                  onClick={applyFixedPixels}
+                                  style={{
+                                    padding: '6px 14px',
+                                    border: '1px solid #9a8b78',
+                                    borderRadius: 4,
+                                    background: '#b55233',
+                                    color: '#fff',
+                                    cursor: applyProgress !== null ? 'not-allowed' : 'pointer',
+                                    fontSize: 13,
+                                    fontWeight: 500,
+                                    opacity: applyProgress !== null ? 0.7 : 1,
+                                  }}
+                                >
+                                  {applyProgress !== null ? t('spriteAdjustFixedPixelApplying') : t('spriteAdjustFixedPixelApply')}
+                                </button>
+                              <button
+                                type="button"
+                                disabled={applyProgress !== null}
+                                onClick={cancelFixedPixels}
+                                style={{
+                                  padding: '6px 14px',
+                                  border: '1px solid #9a8b78',
+                                  borderRadius: 4,
+                                  background: '#e4dbcf',
+                                  color: '#3d3428',
+                                  cursor: applyProgress !== null ? 'not-allowed' : 'pointer',
+                                  fontSize: 13,
+                                  opacity: applyProgress !== null ? 0.7 : 1,
+                                }}
+                              >
+                                {t('spriteAdjustFixedPixelCancel')}
+                              </button>
+                            </Space>
+                              {applyProgress !== null && (
+                                <Progress percent={applyProgress} size="small" status="active" />
+                              )}
+                            </Space>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => { setFixedPixelMode(false); setFixedPixelFixes([]) }}
+                            style={{
+                              padding: '6px 14px',
+                              border: '1px solid #9a8b78',
+                              borderRadius: 4,
+                              background: '#e4dbcf',
+                              color: '#3d3428',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                            }}
+                          >
+                            {t('spriteAdjustFixedPixelExit')}
+                          </button>
+                        </>
+                      )}
+                      {fixedPixelFixes.length > 0 && (
+                        <Text type="secondary" style={{ fontSize: 11 }}>{t('spriteAdjustFixedPixelCount', { n: fixedPixelFixes.length })}</Text>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}

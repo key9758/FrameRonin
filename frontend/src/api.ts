@@ -53,6 +53,38 @@ export function getIndexUrl(jobId: string): string {
   return `${API_BASE}/jobs/${jobId}/index`
 }
 
+export interface WatermarkJob {
+  id: string
+  status: 'queued' | 'processing' | 'completed' | 'failed'
+  progress: number
+  result?: { output?: string }
+  error?: { code: string; message: string }
+}
+
+export async function createWatermarkJob(file: File): Promise<{ job_id: string }> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const res = await fetch(`${API_BASE}/watermark`, {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || String(err))
+  }
+  return res.json()
+}
+
+export async function getWatermarkJob(jobId: string): Promise<WatermarkJob> {
+  const res = await fetch(`${API_BASE}/watermark/${jobId}`)
+  if (!res.ok) throw new Error('任务不存在')
+  return res.json()
+}
+
+export function getWatermarkResultUrl(jobId: string): string {
+  return `${API_BASE}/watermark/${jobId}/result`
+}
+
 /** AI 抠图：上传图片，返回透明背景 PNG Blob。首次调用需下载模型，可能较慢。 */
 export async function removeBackground(file: File): Promise<Blob> {
   const formData = new FormData()

@@ -4,6 +4,11 @@ import { useLanguage } from '../i18n/context'
 const { Text } = Typography
 
 const GEM_V4TX3_URL = 'https://gemini.google.com/gem/1zerS4eXHUGNj2tj-63omHyFRo_4K5S7p?usp=sharing'
+const GEM_HORIZONTAL_CHAR_URL = 'https://gemini.google.com/gem/10LatqlJGxea-I-JCyoNo1rERgZwtKpBi?usp=sharing'
+const GEM_8DIR_TOPDOWN_URL = 'https://gemini.google.com/gem/1Xr3TdyAOLugE19v5poA4LpJSfVT4Drox?usp=sharing'
+
+const HORIZONTAL_CHAR_GIFS = ['h2s1 (1).gif', 'h2s1 (2).gif', 'h2s1 (3).gif', 'h2s1 (4).gif', 'h2s1 (5).gif']
+const D8S_TOPDOWN_GIFS = ['d8s (1).gif', 'd8s (2).gif', 'd8s (3).gif', 'd8s (4).gif', 'd8s (5).gif']
 
 const V4TX3_GIFS = ['A2M_row1.gif', 'A2M_row3.gif', 'row_01.gif', 'row_02.gif', 'row_03.gif', 'row_04.gif', 'row_05.gif', 'jump.gif', 'attack.gif', 'spr.gif']
 
@@ -44,8 +49,38 @@ export default function NanobananaFullChar() {
           ))}
         </div>
       </div>
+      <div style={{ marginTop: 24 }}>
+        <Button type="primary" onClick={() => window.open(GEM_HORIZONTAL_CHAR_URL, '_blank')}>
+          {t('nanobananaFullCharBtn2')}
+        </Button>
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${HORIZONTAL_CHAR_GIFS.length}, 1fr)`, gap: 8, marginTop: 8, width: '100%' }}>
+          {HORIZONTAL_CHAR_GIFS.map((name) => (
+            <img
+              key={name}
+              src={`${import.meta.env.BASE_URL}${encodeURI(name)}`}
+              alt={name}
+              style={{ width: '100%', aspectRatio: 1, objectFit: 'contain', imageRendering: 'pixelated', border: '1px solid rgba(0,0,0,0.1)' }}
+            />
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop: 24 }}>
+        <Button type="primary" onClick={() => window.open(GEM_8DIR_TOPDOWN_URL, '_blank')}>
+          {t('nanobananaFullCharBtn3')}
+        </Button>
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${D8S_TOPDOWN_GIFS.length}, 1fr)`, gap: 8, marginTop: 8, width: '100%' }}>
+          {D8S_TOPDOWN_GIFS.map((name) => (
+            <img
+              key={name}
+              src={`${import.meta.env.BASE_URL}${encodeURI(name)}`}
+              alt={name}
+              style={{ width: '100%', aspectRatio: 1, objectFit: 'contain', imageRendering: 'pixelated', border: '1px solid rgba(0,0,0,0.1)' }}
+            />
+          ))}
+        </div>
+      </div>
       <Space wrap size="middle" style={{ marginTop: 24 }}>
-        {PLACEHOLDER_BUTTON_KEYS.slice(1).map((key) => (
+        {PLACEHOLDER_BUTTON_KEYS.slice(3).map((key) => (
           <Button
             key={key}
             type="primary"
@@ -60,3 +95,4 @@ export default function NanobananaFullChar() {
     </>
   )
 }
+

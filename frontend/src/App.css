@@ -77,6 +77,18 @@
   gap: 2px;
 }
 
+.app-header-ronin-hint {
+  font-size: 11px;
+  color: rgba(200, 190, 175, 0.65);
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .app-header-ronin-hint {
+    display: none;
+  }
+}
+
 .app-header-connect-btn.ant-btn {
   font-size: 12px;
   height: 28px;
@@ -236,6 +248,16 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.app-footer-source {
+  color: #6b5d4d;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.app-footer-source:hover {
+  color: #b55233;
 }
 
 .app-footer-avatar {

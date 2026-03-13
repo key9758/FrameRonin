@@ -27,10 +27,18 @@ MAX_IMAGE_MB = 20
 
 # Worker 与 API 共享存储路径
 from .models import JobParams, JobResponse
-from .storage import ensure_dirs, generate_job_id, get_result_paths, get_video_path, save_uploaded_file
+from .storage import (
+    ensure_dirs,
+    generate_job_id,
+    get_result_paths,
+    get_video_path,
+    get_watermark_output_path,
+    save_uploaded_file,
+)
 
 # 任务状态存储（生产环境应使用 Redis）
 _jobs: dict[str, dict] = {}
+_watermark_jobs: dict[str, dict] = {}
 
 
 def _update_job(job_id: str, **kwargs):
@@ -47,6 +55,20 @@ def _run_pipeline_sync(job_id: str, video_path: str):
         _update_job(job_id, status="completed", progress=100, result=result)
     except Exception as e:
         _update_job(job_id, status="failed", error={"code": "PROCESSING_ERROR", "message": str(e)})
+
+
+def _run_watermark_sync(job_id: str, video_path: str):
+    """同步模式：在后台线程中执行水印去除"""
+    def _update_wm(jid: str, **kwargs):
+        if jid in _watermark_jobs:
+            _watermark_jobs[jid].update(kwargs)
+
+    try:
+        from worker.watermark_remover import run_watermark_pipeline
+        result = run_watermark_pipeline(job_id, video_path, str(OUTPUT_DIR))
+        _update_wm(job_id, status="completed", progress=100, result=result)
+    except Exception as e:
+        _update_wm(job_id, status="failed", error={"code": "PROCESSING_ERROR", "message": str(e)})
 
 app = FastAPI(
     title="PixelWork - 视频转序列帧",
@@ -232,6 +254,125 @@ async def matte_image(file: UploadFile = File(...)):
         return Response(content=result, media_type="image/png")
     except Exception as e:
         raise HTTPException(500, f"抠图失败: {str(e)}")
+
+
+@app.post("/watermark")
+async def create_watermark_job(file: UploadFile = File(...)):
+    """
+    创建 Seedance 水印去除任务。上传视频，返回 job_id，轮询 GET /watermark/{id} 获取状态。
+    """
+    job_id = generate_job_id()
+
+    if not file.filename:
+        raise HTTPException(400, "请上传视频文件")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(400, f"不支持的格式，仅支持: {', '.join(ALLOWED_VIDEO_EXTENSIONS)}")
+
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(400, f"文件过大，限制 {MAX_UPLOAD_SIZE_MB}MB")
+
+    save_uploaded_file(job_id, file.filename or "video.mp4", content)
+    video_path = get_video_path(job_id)
+    if not video_path:
+        raise HTTPException(500, "保存视频失败")
+
+    _watermark_jobs[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "rq_job_id": "",
+        "result": None,
+        "error": None,
+    }
+
+    try:
+        from worker.tasks import enqueue_watermark_job
+        rq_id = enqueue_watermark_job(job_id, str(video_path), str(OUTPUT_DIR))
+        _watermark_jobs[job_id]["rq_job_id"] = rq_id
+    except Exception:
+        _watermark_jobs[job_id]["status"] = "processing"
+        _watermark_jobs[job_id]["rq_job_id"] = ""
+        thread = threading.Thread(target=_run_watermark_sync, args=(job_id, str(video_path)))
+        thread.daemon = True
+        thread.start()
+
+    return {"job_id": job_id}
+
+
+@app.get("/watermark/{job_id}")
+async def get_watermark_job(job_id: str):
+    """查询水印去除任务状态"""
+    if job_id not in _watermark_jobs:
+        raise HTTPException(404, "任务不存在")
+
+    job = _watermark_jobs[job_id]
+    resp = {
+        "id": job_id,
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "error": job.get("error"),
+        "result": job.get("result"),
+    }
+
+    if job["status"] in ("queued", "processing") and job.get("rq_job_id"):
+        try:
+            from worker.tasks import get_job_status
+            rq_status = get_job_status(job["rq_job_id"])
+            status_map = {"queued": "queued", "started": "processing", "finished": "completed", "failed": "failed", "deferred": "queued"}
+            resp["status"] = status_map.get(rq_status["status"], job["status"])
+            if rq_status.get("result"):
+                resp["result"] = rq_status["result"]
+                resp["progress"] = 100
+                job["status"] = "completed"
+                job["progress"] = 100
+                job["result"] = rq_status["result"]
+            if rq_status.get("exc_info"):
+                resp["error"] = {"code": "PROCESSING_ERROR", "message": rq_status["exc_info"]}
+                resp["status"] = "failed"
+                job["status"] = "failed"
+                job["error"] = resp["error"]
+        except Exception:
+            pass
+
+    return resp
+
+
+@app.get("/watermark/{job_id}/result")
+async def get_watermark_result(job_id: str):
+    """下载去水印后的视频"""
+    if job_id not in _watermark_jobs:
+        raise HTTPException(404, "任务不存在")
+    if _watermark_jobs[job_id]["status"] != "completed":
+        raise HTTPException(400, "任务未完成")
+
+    job = _watermark_jobs[job_id]
+    out_path = None
+    if job.get("result", {}).get("output"):
+        p = Path(job["result"]["output"]).resolve()
+        if p.exists():
+            out_path = p
+    if not out_path:
+        out_path = get_watermark_output_path(job_id)
+    if not out_path:
+        raise HTTPException(404, "结果文件不存在")
+
+    return FileResponse(out_path, filename="clean.mp4", media_type="video/mp4")
+
+
+@app.delete("/watermark/{job_id}")
+async def delete_watermark_job(job_id: str):
+    """删除水印去除任务及结果"""
+    if job_id in _watermark_jobs:
+        del _watermark_jobs[job_id]
+    import shutil
+    for base in [UPLOAD_DIR, OUTPUT_DIR, TEMP_DIR]:
+        d = base / job_id
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    return {"ok": True}
 
 
 @app.delete("/jobs/{job_id}")

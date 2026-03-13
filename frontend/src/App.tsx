@@ -5,7 +5,7 @@ import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import jaJP from 'antd/locale/ja_JP'
 import type { ThemeConfig } from 'antd'
-import { AuthProvider } from './auth/context'
+import { AuthProvider, useAuth } from './auth/context'
 import { ImageStashProvider } from './stash/context'
 import { useLanguage } from './i18n/context'
 import ImageStashPanel from './components/ImageStashPanel'
@@ -19,6 +19,7 @@ import SpriteSheetTool from './components/SpriteSheetTool'
 import SpriteSheetAdjust from './components/SpriteSheetAdjust'
 import ImageGeminiWatermark from './components/ImageGeminiWatermark'
 import NanobananaFullChar from './components/NanobananaFullChar'
+import SeedanceWatermarkRemover from './components/SeedanceWatermarkRemover'
 
 const ImageMatte = lazy(() => import('./components/ImageMatte'))
 import ParamsStep from './components/ParamsStep'
@@ -34,6 +35,29 @@ const antdLocales: Record<Lang, typeof zhCN> = { zh: zhCN, en: enUS, ja: jaJP }
 export type Step = 'upload' | 'params'
 
 const STEP_KEYS: Step[] = ['upload', 'params']
+
+function AppHeaderRight({ lang, setLang }: { lang: Lang; setLang: (l: Lang) => void }) {
+  const { t } = useLanguage()
+  const { isConnected } = useAuth()
+  return (
+    <>
+      <div className="app-header-lang">
+        {(['zh', 'en', 'ja'] as const).map((l) => (
+          <button
+            key={l}
+            type="button"
+            className={`app-header-lang-btn ${lang === l ? 'active' : ''}`}
+            onClick={() => setLang(l)}
+          >
+            {l === 'zh' ? '中' : l === 'en' ? 'EN' : '日'}
+          </button>
+        ))}
+      </div>
+      {!isConnected && <span className="app-header-ronin-hint">{t('roninLoginHint')}</span>}
+      <RoninLoginButton />
+    </>
+  )
+}
 
 function App() {
   const { lang, setLang, t } = useLanguage()
@@ -100,19 +124,7 @@ function App() {
               </div>
             </div>
             <div className="app-header-right">
-              <div className="app-header-lang">
-                {(['zh', 'en', 'ja'] as const).map((l) => (
-                  <button
-                    key={l}
-                    type="button"
-                    className={`app-header-lang-btn ${lang === l ? 'active' : ''}`}
-                    onClick={() => setLang(l)}
-                  >
-                    {l === 'zh' ? '中' : l === 'en' ? 'EN' : '日'}
-                  </button>
-                ))}
-              </div>
-              <RoninLoginButton />
+              <AppHeaderRight lang={lang} setLang={setLang} />
             </div>
           </div>
         </Header>
@@ -243,6 +255,19 @@ function App() {
               </div>
               <NanobananaFullChar />
             </Card>
+          ) : mode === 'seedanceWatermark' ? (
+            <Card>
+              <div style={{ marginBottom: 16 }}>
+                <Button
+                  type="text"
+                  icon={<ArrowLeftOutlined />}
+                  onClick={() => setMode(null)}
+                >
+                  {t('backToHome')}
+                </Button>
+              </div>
+              <SeedanceWatermarkRemover />
+            </Card>
           ) : (
             <>
               <Steps
@@ -292,6 +317,10 @@ function App() {
                 <img src={`${import.meta.env.BASE_URL}ronincat.png`} alt="RoninCat" className="app-footer-avatar" />
                 <strong>RoninCat</strong>
               </span>
+              <span className="app-footer-sep">·</span>
+              <a href="https://github.com/systemchester/FrameRonin" target="_blank" rel="noopener noreferrer" className="app-footer-source">
+                {t('footerSourceCode')}
+              </a>
             </div>
           </div>
         </Footer>

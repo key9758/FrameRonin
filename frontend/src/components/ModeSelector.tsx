@@ -7,12 +7,12 @@ const { Text } = Typography
 
 const GEM_V2_URL = 'https://gemini.google.com/gem/1ex8XOSNJzjAND6Ujz9aKFKbIyqzcvTCv?usp=sharing'
 const GEM_V3_URL = 'https://gemini.google.com/gem/1hAu-pMGYI34Bp_ttYHrRIGljhjbmoFjZ?usp=sharing'
-const GEM_CHAR_V23OT_URL = 'https://gemini.google.com/gem/194dFaRUI2l4kFnLEVzmwIvVYTDgFmGvj?usp=sharing'
+const GEM_CHAR_V23OT_URL = 'https://gemini.google.com/gem/1mRxvjPRe_jWUxHNB9R7S3aiLiHOTQIU5?usp=sharing'
 const GEM_SCENE_URL = 'https://gemini.google.com/gem/1a83JP082OIliUQZN5SsBguMOrYm4g6P2?usp=sharing'
 const GEM_ILLUST_URL = 'https://gemini.google.com/gem/1IUuJXgHTTbMEgv5D_G0HXSHXxYdcfTZg?usp=sharing'
 const GEM_RPGMAKER_URL = 'https://gemini.google.com/gem/1zkDfsN972fczP66xwCiQ6H0jP7HLtGz5?usp=sharing'
 
-export type AppMode = 'video' | 'image' | 'gif' | 'spritesheet' | 'spriteadjust' | 'pixelate' | 'expandshrink' | 'matte' | 'geminiwatermark' | 'nanobananaFullChar' | null
+export type AppMode = 'video' | 'image' | 'gif' | 'spritesheet' | 'spriteadjust' | 'pixelate' | 'expandshrink' | 'matte' | 'geminiwatermark' | 'nanobananaFullChar' | 'seedanceWatermark' | null
 
 interface Props {
   onSelect: (mode: AppMode) => void
@@ -412,6 +412,30 @@ export default function ModeSelector({ onSelect }: Props) {
         </Card>
       </Col>
     </Row>
+      <Row gutter={24} style={{ marginTop: 8, marginBottom: 24 }}>
+        <Col xs={24}>
+          <Card
+            hoverable
+            onClick={() => onSelect('seedanceWatermark')}
+            styles={{ body: { padding: '16px 24px' } }}
+            style={{
+              textAlign: 'center',
+              cursor: 'pointer',
+              borderColor: '#9a8b78',
+              background: 'linear-gradient(135deg, #ede6dc 0%, #e8dfd4 100%)',
+              borderWidth: 2,
+            }}
+          >
+            <VideoCameraOutlined style={{ fontSize: 36, color: '#b55233', marginBottom: 12 }} />
+            <div style={{ lineHeight: 1.4 }}>
+              <Text strong style={{ fontSize: 15 }}>{t('moduleSeedanceWatermarkRemover')}</Text>
+            </div>
+            <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12, lineHeight: 1.4 }}>
+              {t('moduleSeedanceWatermarkRemoverDesc')}
+            </Text>
+          </Card>
+        </Col>
+      </Row>
     </>
   )
 }

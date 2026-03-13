@@ -68,3 +68,12 @@ def get_result_paths(job_id: str) -> Optional[tuple[Path, Path]]:
     if sprite.exists() and index.exists():
         return sprite, index
     return None
+
+
+def get_watermark_output_path(job_id: str) -> Optional[Path]:
+    """获取水印去除任务的结果视频路径"""
+    output_path, _, _ = get_job_dirs(job_id)
+    clean = output_path / "clean.mp4"
+    if clean.exists():
+        return clean
+    return None
