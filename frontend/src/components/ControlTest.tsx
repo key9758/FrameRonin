@@ -720,7 +720,6 @@ export default function ControlTest({ onBack }: ControlTestProps) {
               style={{
                 display: 'block',
                 imageRendering: 'pixelated',
-                imageRendering: 'crisp-edges',
               }}
             />
           </div>
