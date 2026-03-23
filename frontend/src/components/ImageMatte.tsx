@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { App, Button, ColorPicker, Segmented, Slider, Space, Spin, Typography, Upload } from 'antd'
-import { DownloadOutlined } from '@ant-design/icons'
+import { DownloadOutlined, InboxOutlined } from '@ant-design/icons'
 import { removeGeminiWatermarkFromBlob } from '../lib/geminiWatermark'
 import type { UploadFile } from 'antd'
 import { useLanguage } from '../i18n/context'
+import { useImageStash } from '../stash/context'
 import StashableImage from './StashableImage'
 import StashDropZone from './StashDropZone'
-import { processDoubleBackground } from '../lib/doubleBackgroundMatte'
+import {
+  applyAlphaErosionToCanvas,
+  postProcessDoubleBackgroundMatte,
+  processDoubleBackground,
+} from '../lib/doubleBackgroundMatte'
 
 const { Dragger } = Upload
 const { Text } = Typography
@@ -255,7 +260,7 @@ function whiteKeyErodeGLSL(
 
   const tol = (tolerance / 100) * 0.4 + 0.55
   const smooth = (smoothness / 100) * 0.12 + 0.02
-  const erodePasses = Math.floor((erosion / 100) * 5)
+  const erodePasses = Math.min(5, Math.round((erosion / 100) * 10))
 
   function drawQuad(program: WebGLProgram) {
     gl.useProgram(program)
@@ -311,6 +316,7 @@ type AlgorithmType = 'chroma' | 'whiteErode' | 'doubleBg'
 export default function ImageMatte() {
   const { message } = App.useApp()
   const { t } = useLanguage()
+  const { addImage } = useImageStash()
   const [file, setFile] = useState<File | null>(null)
   const [originalUrl, setOriginalUrl] = useState<string | null>(null)
   const [fileBlack, setFileBlack] = useState<File | null>(null)
@@ -330,8 +336,13 @@ export default function ImageMatte() {
   const [doubleBgBlackReady, setDoubleBgBlackReady] = useState(false)
   const [doubleBgWhiteReady, setDoubleBgWhiteReady] = useState(false)
   const [doubleBgProcessing, setDoubleBgProcessing] = useState(false)
-  const [doubleBgTolerance, setDoubleBgTolerance] = useState(50)
-  const [doubleBgEdgeContrast, setDoubleBgEdgeContrast] = useState(50)
+  /** 递增则强制从原图重新走一遍去水印 + 双背景抠图（清空 clean 缓存） */
+  const [doubleBgRerunKey, setDoubleBgRerunKey] = useState(0)
+  const [doubleBgTolerance, setDoubleBgTolerance] = useState(70)
+  const [doubleBgEdgeContrast, setDoubleBgEdgeContrast] = useState(53)
+  /** 0–100：仅在「去背景后处理」完成后生效，从修复结果上再做 Alpha 侵蚀 */
+  const [doubleBgPostErosion, setDoubleBgPostErosion] = useState(0)
+  const [doubleBgPostRepairReady, setDoubleBgPostRepairReady] = useState(false)
   const [doubleBgZoom, setDoubleBgZoom] = useState(1)
   const [doubleBgPan, setDoubleBgPan] = useState({ x: 0, y: 0 })
   const [doubleBgDragging, setDoubleBgDragging] = useState(false)
@@ -345,9 +356,21 @@ export default function ImageMatte() {
   const blackImgRef = useRef<HTMLImageElement | null>(null)
   const whiteImgRef = useRef<HTMLImageElement | null>(null)
   const resultCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  /** 当前双背景抠图原始结果（未后处理）；与预览上的侵蚀显示分离 */
+  const doubleBgRawMatteRef = useRef<HTMLCanvasElement | null>(null)
+  /** 「去背景后修复」未侵蚀的基准画布；滑条侵蚀在此基础上重算 */
+  const doubleBgPostRepairBaseRef = useRef<HTMLCanvasElement | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
 
+  /** 清除「修复+侵蚀」状态；不清理 raw matte（由 runSync 或全清路径单独写 raw） */
+  const clearDoubleBgPostRepair = useCallback(() => {
+    doubleBgPostRepairBaseRef.current = null
+    setDoubleBgPostRepairReady(false)
+  }, [])
+
   const setAlgorithmAndClear = (v: AlgorithmType) => {
+    clearDoubleBgPostRepair()
+    doubleBgRawMatteRef.current = null
     setAlgorithm(v)
     setResultUrl(null)
     if (v !== 'doubleBg') {
@@ -459,6 +482,8 @@ export default function ImageMatte() {
   useEffect(() => {
     if (algorithm === 'doubleBg') {
       if (!doubleBgBlackReady || !doubleBgWhiteReady || !blackImgRef.current || !whiteImgRef.current) {
+        clearDoubleBgPostRepair()
+        doubleBgRawMatteRef.current = null
         setResultUrl(null)
         setDoubleBgProcessing(false)
         return
@@ -467,12 +492,16 @@ export default function ImageMatte() {
       const white = whiteImgRef.current!
       if (black.naturalWidth !== white.naturalWidth || black.naturalHeight !== white.naturalHeight) {
         message.error(t('chromaDoubleBgSizeMismatch'))
+        clearDoubleBgPostRepair()
+        doubleBgRawMatteRef.current = null
         setResultUrl(null)
         setDoubleBgProcessing(false)
         return
       }
       const runSync = (bImg: HTMLImageElement, wImg: HTMLImageElement) => {
+        clearDoubleBgPostRepair()
         const canvas = processDoubleBackground(bImg, wImg, doubleBgTolerance, doubleBgEdgeContrast)
+        doubleBgRawMatteRef.current = canvas
         resultCanvasRef.current = canvas
         setResultUrl((old) => {
           if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
@@ -511,6 +540,8 @@ export default function ImageMatte() {
           runSync(blackImg, whiteImg)
         } catch (e) {
           message.error(t('chromaFailed') + ': ' + String(e))
+          clearDoubleBgPostRepair()
+          doubleBgRawMatteRef.current = null
           setResultUrl(null)
         } finally {
           setDoubleBgProcessing(false)
@@ -525,7 +556,7 @@ export default function ImageMatte() {
       let canvas: HTMLCanvasElement
       if (algorithm === 'chroma') {
         canvas = chromaKeyCanvas(img, keyColor, tolerance, smoothness, spill)
-        const erodePasses = Math.floor((erosion / 100) * 5)
+        const erodePasses = Math.min(5, Math.round((erosion / 100) * 10))
         if (erodePasses > 0) {
           canvas = erodeAlphaOnCanvas(canvas, erodePasses)
         }
@@ -540,14 +571,76 @@ export default function ImageMatte() {
     } catch (e) {
       message.error(t('chromaFailed') + ': ' + String(e))
     }
-  }, [algorithm, sourceReady, doubleBgBlackReady, doubleBgWhiteReady, doubleBgTolerance, doubleBgEdgeContrast, keyColor, tolerance, smoothness, spill, erosion, message, t])
+  }, [
+    algorithm,
+    clearDoubleBgPostRepair,
+    sourceReady,
+    doubleBgBlackReady,
+    doubleBgWhiteReady,
+    doubleBgTolerance,
+    doubleBgEdgeContrast,
+    doubleBgRerunKey,
+    keyColor,
+    tolerance,
+    smoothness,
+    spill,
+    erosion,
+    message,
+    t,
+  ])
+
+  useEffect(() => {
+    if (algorithm !== 'doubleBg' || !doubleBgPostRepairReady) return
+    const base = doubleBgPostRepairBaseRef.current
+    if (!base) return
+    try {
+      const display = applyAlphaErosionToCanvas(base, doubleBgPostErosion)
+      resultCanvasRef.current = display
+      setResultUrl((old) => {
+        if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
+        return display.toDataURL('image/png')
+      })
+    } catch (e) {
+      message.error(`${t('chromaFailed')}: ${String(e)}`)
+    }
+  }, [algorithm, doubleBgPostErosion, doubleBgPostRepairReady, message, t])
+
+  const redoDoubleBackgroundMatte = useCallback(() => {
+    if (algorithm !== 'doubleBg' || doubleBgProcessing) return
+    if (!doubleBgBlackReady || !doubleBgWhiteReady) return
+    doubleBgBlackCleanRef.current = null
+    doubleBgWhiteCleanRef.current = null
+    clearDoubleBgPostRepair()
+    setDoubleBgRerunKey((k) => k + 1)
+  }, [algorithm, clearDoubleBgPostRepair, doubleBgBlackReady, doubleBgProcessing, doubleBgWhiteReady])
+
+  const applyDoubleBgPostProcess = useCallback(() => {
+    const raw = doubleBgRawMatteRef.current ?? resultCanvasRef.current
+    if (!raw || algorithm !== 'doubleBg') return
+    try {
+      const repaired = postProcessDoubleBackgroundMatte(raw)
+      doubleBgPostRepairBaseRef.current = repaired
+      setDoubleBgPostRepairReady(true)
+      message.success(t('chromaDoubleBgPostProcessDone'))
+    } catch (e) {
+      message.error(`${t('chromaFailed')}: ${String(e)}`)
+    }
+  }, [algorithm, message, t])
+
+  const doubleBgStashBaseName = useCallback(() => {
+    return (
+      fileBlack?.name?.replace(/\.[^.]+$/, '') ??
+      fileWhite?.name?.replace(/\.[^.]+$/, '') ??
+      'doublebg'
+    )
+  }, [fileBlack?.name, fileWhite?.name])
 
   const download = () => {
     const canvas = resultCanvasRef.current
     if (!canvas) return
     const baseName =
       algorithm === 'doubleBg'
-        ? (fileBlack?.name?.replace(/\.[^.]+$/, '') ?? fileWhite?.name?.replace(/\.[^.]+$/, '') ?? 'result')
+        ? doubleBgStashBaseName()
         : (file?.name?.replace(/\.[^.]+$/, '') ?? 'result')
     canvas.toBlob((blob) => {
       if (!blob) return
@@ -558,6 +651,23 @@ export default function ImageMatte() {
       URL.revokeObjectURL(a.href)
     }, 'image/png', 0.95)
   }
+
+  const sendDoubleBgToStash = useCallback(() => {
+    if (algorithm !== 'doubleBg' || doubleBgProcessing) return
+    const canvas = resultCanvasRef.current
+    if (!canvas) return
+    const stashName = `${doubleBgStashBaseName()}_doublebg.png`
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return
+        const url = URL.createObjectURL(blob)
+        void addImage(url, stashName)
+        message.success(t('imgFineEditorSendToStashSuccess'))
+      },
+      'image/png',
+      0.95
+    )
+  }, [addImage, algorithm, doubleBgProcessing, doubleBgStashBaseName, message, t])
 
   const handleImageClick = (e: React.MouseEvent<HTMLImageElement>) => {
     const img = e.currentTarget
@@ -790,6 +900,19 @@ export default function ImageMatte() {
             <Button icon={<DownloadOutlined />} onClick={download}>
               {t('imgDownload')}
             </Button>
+            {algorithm === 'doubleBg' && !doubleBgProcessing && (
+              <>
+                <Button onClick={redoDoubleBackgroundMatte} title={t('chromaDoubleBgRedoHint')}>
+                  {t('chromaDoubleBgRedoBtn')}
+                </Button>
+                <Button onClick={applyDoubleBgPostProcess} title={t('chromaDoubleBgPostProcessHint')}>
+                  {t('chromaDoubleBgPostProcessBtn')}
+                </Button>
+                <Button icon={<InboxOutlined />} onClick={sendDoubleBgToStash} title={t('imgFineEditorSendToStash')}>
+                  {t('imgFineEditorSendToStash')}
+                </Button>
+              </>
+            )}
             <Button type={bgColorActive ? 'primary' : 'default'} size="small" onClick={() => setBgColorActive((v) => !v)}>
               {t('chromaBgBtn')}
             </Button>
@@ -874,6 +997,22 @@ export default function ImageMatte() {
                   <Text style={{ color: '#fff', fontSize: 10, whiteSpace: 'nowrap', flexShrink: 0 }}>{t('chromaDoubleBgEdgeContrast')}</Text>
                   <Slider min={50} max={100} value={doubleBgEdgeContrast} onChange={setDoubleBgEdgeContrast} style={{ flex: 1, margin: '0 4px' }} />
                   <Text style={{ color: '#aaa', fontSize: 10, width: 20, textAlign: 'right' }}>{doubleBgEdgeContrast}</Text>
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, flex: 1, minWidth: 0 }}>
+                  <Text style={{ color: '#fff', fontSize: 10, whiteSpace: 'nowrap', flexShrink: 0 }} title={t('chromaDoubleBgPostErosionHint')}>
+                    {t('chromaDoubleBgPostErosion')}
+                  </Text>
+                  <Slider
+                    min={0}
+                    max={100}
+                    value={doubleBgPostErosion}
+                    onChange={setDoubleBgPostErosion}
+                    disabled={!doubleBgPostRepairReady}
+                    style={{ flex: 1, margin: '0 4px' }}
+                  />
+                  <Text style={{ color: '#aaa', fontSize: 10, width: 20, textAlign: 'right' }}>{doubleBgPostErosion}</Text>
                 </span>
               </div>
             </div>

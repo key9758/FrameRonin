@@ -24,7 +24,11 @@ import {
   wfMergeStrip,
   wfPadExpand,
 } from './roninProWorkflowGridOps'
-import { doubleBackgroundMatteFromBlobs } from './doubleBackgroundMatte'
+import {
+  applyAlphaErosionToBlob,
+  doubleBackgroundMatteFromBlobs,
+  postProcessDoubleBgMatteBlob,
+} from './doubleBackgroundMatte'
 
 export const RONIN_PRO_WORKFLOW_VERSION = 1
 
@@ -38,6 +42,10 @@ export type WorkflowNodeType =
   | 'matteGlobal'
   /** 双背景抠图：需两条输入（黑底 inA、白底 inB） */
   | 'matteDoubleBackground'
+  /** 双背景/透明抠图结果后修复：单输入，与去背页「去背景后处理」一致 */
+  | 'mattePostRepair'
+  /** 贴边 Alpha 硬削：与去背页「边缘侵蚀」相同，0–100 强度 */
+  | 'alphaFrontierErode'
   | 'padExpand'
   | 'evenSplitStrip'
   | 'mergeStrip'
@@ -100,8 +108,10 @@ export const WORKFLOW_PALETTE: { type: WorkflowNodeType; defaultParams: Record<s
   { type: 'matteGlobal', defaultParams: { tolerance: 80, feather: 5 } },
   {
     type: 'matteDoubleBackground',
-    defaultParams: { tolerance: 50, edgeContrast: 50 },
+    defaultParams: { tolerance: 70, edgeContrast: 53 },
   },
+  { type: 'mattePostRepair', defaultParams: {} },
+  { type: 'alphaFrontierErode', defaultParams: { erosion: 0 } },
   { type: 'padExpand', defaultParams: { padTop: 0, padRight: 0, padBottom: 0, padLeft: 0 } },
   { type: 'evenSplitStrip', defaultParams: { evenCols: 4, evenRows: 4 } },
   { type: 'mergeStrip', defaultParams: { mergeCols: 4, frameCount: 16 } },
@@ -293,6 +303,12 @@ async function runOneStep(blob: Blob, node: WorkflowNode): Promise<Blob> {
         bottom: Math.max(0, Math.round(p.bottom ?? 0)),
       })
     }
+    case 'mattePostRepair':
+      return postProcessDoubleBgMatteBlob(blob)
+    case 'alphaFrontierErode': {
+      const erosionUi = Math.min(100, Math.max(0, Math.round(p.erosion ?? 0)))
+      return applyAlphaErosionToBlob(blob, erosionUi)
+    }
     case 'matteContiguous':
     case 'matteGlobal': {
       const { r, g, b } = await getTopLeftPixelColor(blob)
@@ -410,8 +426,8 @@ async function executeDagNode(
     const bb = blobMap.get(eb.source)
     if (!ba || !bb) throw new Error('DAG_DOUBLE_BG_BLOBS')
     const p = n.params
-    const tolerance = Math.min(100, Math.max(0, Math.round(p.tolerance ?? 50)))
-    const edgeContrast = Math.min(100, Math.max(0, Math.round(p.edgeContrast ?? 50)))
+    const tolerance = Math.min(100, Math.max(0, Math.round(p.tolerance ?? 70)))
+    const edgeContrast = Math.min(100, Math.max(0, Math.round(p.edgeContrast ?? 53)))
     return doubleBackgroundMatteFromBlobs(ba, bb, tolerance, edgeContrast)
   }
   const inc = edges.filter((e) => e.target === n.id && e.targetPort == null)
@@ -774,6 +790,8 @@ const VALID_TYPES = new Set<WorkflowNodeType>([
   'matteContiguous',
   'matteGlobal',
   'matteDoubleBackground',
+  'mattePostRepair',
+  'alphaFrontierErode',
   'padExpand',
   'evenSplitStrip',
   'mergeStrip',

@@ -8,6 +8,7 @@ import {
   InputNumber,
   message,
   Row,
+  Slider,
   Space,
   Typography,
   Upload,
@@ -82,6 +83,8 @@ const NODE_LABEL_I18N: Record<WorkflowNodeType, string> = {
   matteContiguous: 'roninProWorkflowNode_matteContiguous',
   matteGlobal: 'roninProWorkflowNode_matteGlobal',
   matteDoubleBackground: 'roninProWorkflowNode_matteDoubleBackground',
+  mattePostRepair: 'roninProWorkflowNode_mattePostRepair',
+  alphaFrontierErode: 'roninProWorkflowNode_alphaFrontierErode',
   padExpand: 'roninProWorkflowNode_padExpand',
   evenSplitStrip: 'roninProWorkflowNode_evenSplitStrip',
   mergeStrip: 'roninProWorkflowNode_mergeStrip',
@@ -631,8 +634,8 @@ export default function RoninProCustomWorkflow({ onSendToFineProcess }: RoninPro
                   max={100}
                   size="small"
                   style={INPUT_FULL}
-                  value={Math.round(p.tolerance ?? 50)}
-                  onChange={(v) => updateNodeParam(id, 'tolerance', wfClampInt(v, 0, 100, 50))}
+                  value={Math.round(p.tolerance ?? 70)}
+                  onChange={(v) => updateNodeParam(id, 'tolerance', wfClampInt(v, 0, 100, 70))}
                 />
               </div>
               <div>
@@ -642,8 +645,27 @@ export default function RoninProCustomWorkflow({ onSendToFineProcess }: RoninPro
                   max={100}
                   size="small"
                   style={INPUT_FULL}
-                  value={Math.round(p.edgeContrast ?? 50)}
-                  onChange={(v) => updateNodeParam(id, 'edgeContrast', wfClampInt(v, 0, 100, 50))}
+                  value={Math.round(p.edgeContrast ?? 53)}
+                  onChange={(v) => updateNodeParam(id, 'edgeContrast', wfClampInt(v, 0, 100, 53))}
+                />
+              </div>
+            </Space>
+          )
+        case 'mattePostRepair':
+          return (
+            <Text style={{ color: '#8b93a5', fontSize: 11 }}>{t('roninProWorkflowMattePostRepairHint')}</Text>
+          )
+        case 'alphaFrontierErode':
+          return (
+            <Space direction="vertical" style={{ width: '100%' }} size="small">
+              <Text style={{ color: '#8b93a5', fontSize: 11 }}>{t('roninProWorkflowAlphaFrontierErodeHint')}</Text>
+              <div>
+                <Text style={{ color: '#9aa3b5', fontSize: 11 }}>{t('roninProWorkflowAlphaFrontierErodeStrength')}</Text>
+                <Slider
+                  min={0}
+                  max={100}
+                  value={Math.round(p.erosion ?? 0)}
+                  onChange={(v) => updateNodeParam(id, 'erosion', Math.round(v))}
                 />
               </div>
             </Space>
