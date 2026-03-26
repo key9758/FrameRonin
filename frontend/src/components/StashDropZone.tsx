@@ -16,7 +16,11 @@ export default function StashDropZone({
   maxSizeMB = 20,
   onSizeError,
 }: StashDropZoneProps) {
-  const handleDrop = useCallback(
+  /**
+   * 必须在捕获阶段处理：若用冒泡 onDrop，内层 antd Dragger 会先 beforeUpload 加一份文件，
+   * 再冒泡到本层又 onStashDrop，导致同一张图出现两次。
+   */
+  const handleDropCapture = useCallback(
     async (e: React.DragEvent) => {
       const url = e.dataTransfer.getData(STASH_DRAG_TYPE)
       if (url) {
@@ -66,7 +70,11 @@ export default function StashDropZone({
   }, [])
 
   return (
-    <div onDrop={handleDrop} onDragOver={handleDragOver} style={{ display: 'inline-block', width: '100%' }}>
+    <div
+      onDropCapture={handleDropCapture}
+      onDragOver={handleDragOver}
+      style={{ display: 'inline-block', width: '100%' }}
+    >
       {children}
     </div>
   )

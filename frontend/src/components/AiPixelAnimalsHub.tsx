@@ -11,6 +11,8 @@ const GEM_PIXEL_DOG_URL =
   'https://gemini.google.com/gem/190hxL7jtTO--9GCNMVvmtYsVZ2H6VBi0?usp=sharing'
 const GEM_PIXEL_BIRD_MONSTER_URL =
   'https://gemini.google.com/gem/1pouwyiLb7tf6A9U6PS1z3S8wnSofDALN?usp=sharing'
+const GEM_PIXEL_JIKUN_URL =
+  'https://gemini.google.com/gem/1AQglfk8d8QzYz46oeP5CZzDjyhUK6_dx?usp=sharing'
 
 const DOG_PREVIEW_GIFS = [
   `${base}animals/dog1.gif`,
@@ -24,8 +26,16 @@ const BIRD_PREVIEW_GIFS = [
   `${base}animals/bird3.gif`,
   `${base}animals/bird4.gif`,
 ]
+const JIKUN_PREVIEW_GIFS = [
+  new URL('../../只因 (1).gif', import.meta.url).href,
+  new URL('../../只因 (2).gif', import.meta.url).href,
+  new URL('../../只因 (3).gif', import.meta.url).href,
+  new URL('../../只因 (4).gif', import.meta.url).href,
+  new URL('../../只因 (5).gif', import.meta.url).href,
+  new URL('../../只因 (6).gif', import.meta.url).href,
+]
 
-const PLACEHOLDER_COUNT = 3
+const PLACEHOLDER_COUNT = 2
 
 interface AiPixelAnimalsHubProps {
   onBack: () => void
@@ -90,7 +100,28 @@ export default function AiPixelAnimalsHub({ onBack }: AiPixelAnimalsHubProps) {
             ))}
           </div>
         </div>
-        {Array.from({ length: PLACEHOLDER_COUNT }, (_, i) => i + 3).map((n) => (
+        <div>
+          <Button
+            type="primary"
+            href={GEM_PIXEL_JIKUN_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ minWidth: 128 }}
+          >
+            只因
+          </Button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            {JIKUN_PREVIEW_GIFS.map((src, i) => (
+              <img
+                key={i}
+                src={src}
+                alt={`jikun ${i + 1}`}
+                style={{ width: 48, height: 48, objectFit: 'contain', imageRendering: 'pixelated' }}
+              />
+            ))}
+          </div>
+        </div>
+        {Array.from({ length: PLACEHOLDER_COUNT }, (_, i) => i + 4).map((n) => (
           <Button key={n} type="dashed" disabled style={{ minWidth: 128 }}>
             {t('aiPixelAnimalsSlot', { n })}
           </Button>
