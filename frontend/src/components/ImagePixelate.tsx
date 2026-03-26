@@ -29,6 +29,48 @@ function f(t: number): number {
   return t > 0.008856 ? t ** (1 / 3) : 7.787 * t + 16 / 116
 }
 
+/** 与上方 rgbToLab 同一套线性 RGB → Lab 定义的可逆变换 */
+function fInv(ft: number): number {
+  const cube = ft * ft * ft
+  return cube > 0.008856 ? cube : (ft - 16 / 116) / 7.787
+}
+
+function labToRgb(l: number, a: number, b: number): [number, number, number] {
+  const fy = (l + 16) / 116
+  const fx = a / 500 + fy
+  const fz = fy - b / 200
+  const rLin = fInv(fx) * (95.047 / 100)
+  const gLin = fInv(fy)
+  const bLin = fInv(fz) * (108.883 / 100)
+  const toSrgbByte = (u: number) => {
+    const c = Math.max(0, Math.min(1, u))
+    const x = c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055
+    return Math.max(0, Math.min(255, Math.round(x * 255)))
+  }
+  return [toSrgbByte(rLin), toSrgbByte(gLin), toSrgbByte(bLin)]
+}
+
+/** 在 LAB 空间按网格对齐相近颜色；strength 0～100，越大合并越强 */
+function applyMergeNearbyLab(imageData: ImageData, strength: number): void {
+  if (strength <= 0) return
+  const t = strength / 100
+  const stepL = 2 + t * 26
+  const stepA = 1.5 + t * 14
+  const stepB = 1.5 + t * 14
+  const d = imageData.data
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3]! < 128) continue
+    let [L, la, lb] = rgbToLab(d[i]!, d[i + 1]!, d[i + 2]!)
+    L = Math.round(L / stepL) * stepL
+    la = Math.round(la / stepA) * stepA
+    lb = Math.round(lb / stepB) * stepB
+    const [r, g, b] = labToRgb(L, la, lb)
+    d[i] = r
+    d[i + 1] = g
+    d[i + 2] = b
+  }
+}
+
 interface Color16Options {
   method: 'rgb' | 'lab'
   dither: boolean
@@ -202,14 +244,31 @@ function pixelateImage(img: HTMLImageElement, pixelSize: number): Promise<Blob> 
   })
 }
 
+function mergeNearbyColorsImage(img: HTMLImageElement, strength: number): Promise<Blob> {
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(img, 0, 0)
+  const imageData = ctx.getImageData(0, 0, w, h)
+  applyMergeNearbyLab(imageData, strength)
+  ctx.putImageData(imageData, 0, 0)
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('blob'))), 'image/png')
+  })
+}
+
 export default function ImagePixelate() {
   const { t } = useLanguage()
-  const [activeTab, setActiveTab] = useState<'pixelate' | 'color16' | 'advanced'>('pixelate')
+  const [activeTab, setActiveTab] = useState<'pixelate' | 'mergeNearby' | 'color16' | 'advanced'>('pixelate')
   const [color16Method, setColor16Method] = useState<'rgb' | 'lab'>('lab')
   const [color16Dither, setColor16Dither] = useState(true)
   const [file, setFile] = useState<File | null>(null)
   const [originalUrl, setOriginalUrl] = useState<string | null>(null)
   const [pixelSize, setPixelSize] = useState(8)
+  const [mergeNearbyStrength, setMergeNearbyStrength] = useState(40)
   const [advUpscale, setAdvUpscale] = useState(5)
   const [advColors, setAdvColors] = useState(32)
   const [advScaleResult, setAdvScaleResult] = useState(1)
@@ -298,6 +357,38 @@ export default function ImagePixelate() {
     }
   }
 
+  const runMergeNearby = async () => {
+    if (!file) return
+    if (mergeNearbyStrength <= 0) {
+      message.warning(t('pixelateMergeNearbyNeedStrength'))
+      return
+    }
+    setLoading(true)
+    setResultUrl((old) => {
+      if (old) URL.revokeObjectURL(old)
+      return null
+    })
+    setResultBlob(null)
+    try {
+      const url = URL.createObjectURL(file)
+      const img = await new Promise<HTMLImageElement>((res, rej) => {
+        const i = new Image()
+        i.onload = () => res(i)
+        i.onerror = () => rej(new Error('load'))
+        i.src = url
+      })
+      URL.revokeObjectURL(url)
+      const blob = await mergeNearbyColorsImage(img, mergeNearbyStrength)
+      setResultBlob(blob)
+      setResultUrl(URL.createObjectURL(blob))
+      message.success(t('pixelateMergeNearbySuccess'))
+    } catch (e) {
+      message.error(t('pixelateMergeNearbyFailed') + ': ' + String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const run16Color = async () => {
     if (!file) return
     setLoading(true)
@@ -339,7 +430,7 @@ export default function ImagePixelate() {
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Tabs
         activeKey={activeTab}
-        onChange={(k) => setActiveTab(k as 'pixelate' | 'color16' | 'advanced')}
+        onChange={(k) => setActiveTab(k as 'pixelate' | 'mergeNearby' | 'color16' | 'advanced')}
         items={[
           {
             key: 'pixelate',
@@ -362,6 +453,29 @@ export default function ImagePixelate() {
                   <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>{t('pixelateSizeHint')}</Text>
                 </div>
               </>
+            ),
+          },
+          {
+            key: 'mergeNearby',
+            label: t('pixelateTabMergeNearby'),
+            children: (
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                <Text type="secondary" style={{ display: 'block' }}>{t('pixelateMergeNearbyModuleHint')}</Text>
+                <div>
+                  <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>{t('pixelateMergeNearbyStrength')}</Text>
+                  <Space wrap>
+                    <Slider
+                      min={1}
+                      max={100}
+                      value={mergeNearbyStrength}
+                      onChange={setMergeNearbyStrength}
+                      style={{ width: 200, marginRight: 16 }}
+                    />
+                    <InputNumber min={1} max={100} value={mergeNearbyStrength} onChange={(v) => setMergeNearbyStrength(v ?? 40)} style={{ width: 90 }} />
+                  </Space>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>{t('pixelateMergeNearbyHint')}</Text>
+                </div>
+              </Space>
             ),
           },
           {
@@ -499,6 +613,11 @@ export default function ImagePixelate() {
         {activeTab === 'pixelate' && (
           <Button type="primary" loading={loading} onClick={runPixelate} disabled={!file}>
             {t('pixelateApply')}
+          </Button>
+        )}
+        {activeTab === 'mergeNearby' && (
+          <Button type="primary" loading={loading} onClick={runMergeNearby} disabled={!file}>
+            {t('pixelateMergeNearbyApply')}
           </Button>
         )}
         {activeTab === 'color16' && (
