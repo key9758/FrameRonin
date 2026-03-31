@@ -5,9 +5,6 @@
  */
 import { loadOpenCv } from './pixellise/opencv'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Cv = any
-
 export type OpticalFlowQuality = 'fast' | 'balanced' | 'high'
 
 export interface OpticalFlowInterpolateOptions {

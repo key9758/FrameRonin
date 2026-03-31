@@ -246,7 +246,7 @@ function splitSpriteSheetWithStarts(
 }
 
 /** 同一行带内所有竖线同时加同一 offset 时，offset 的可行区间（像素，整数） */
-function bandColOffsetBounds(colStarts: number[], fullW: number): { min: number; max: number } {
+function bandColOffsetBounds(colStarts: number[]): { min: number; max: number } {
   const n = colStarts.length
   if (n < 2) return { min: 0, max: 0 }
   let lo = -Infinity
@@ -679,7 +679,7 @@ export default function RoninProCustomSlice() {
 
   const setL7BandColOffsetBand = (bandIndex: number, value: number) => {
     if (!previewColStarts || !previewMeta) return
-    const { min, max } = bandColOffsetBounds(previewColStarts, previewMeta.w)
+    const { min, max } = bandColOffsetBounds(previewColStarts)
     const v = Math.max(min, Math.min(max, Math.floor(value)))
     const rowsN = previewMeta.rows
     setL7BandColOffset((prev) => {
@@ -1579,7 +1579,7 @@ export default function RoninProCustomSlice() {
                 {previewMeta.rows > 1 &&
                   l7BandColOffset.length === previewMeta.rows &&
                   (() => {
-                    const b = bandColOffsetBounds(previewColStarts, previewMeta.w)
+                    const b = bandColOffsetBounds(previewColStarts)
                     const rowsN = previewMeta.rows
                     if (b.min > b.max) return null
                     return (
