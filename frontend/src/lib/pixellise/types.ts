@@ -21,6 +21,7 @@ export type WorkerOutput =
   | { type: 'error'; message: string }
 
 export interface AdvancedPixelateOptions {
+  /** 网格检测前最近邻放大倍数，建议 1～7；大图会被管线自动上限 */
   upscale: number
   numColors: number
   /** 每个逻辑像素在输出中的边长（最近邻），类似 `-s` */

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Button, InputNumber, message, Space, Tabs, Typography, Upload } from 'antd'
+import { Button, Checkbox, InputNumber, message, Slider, Space, Tabs, Typography, Upload } from 'antd'
 import {
   DeleteOutlined,
   DownloadOutlined,
@@ -14,6 +14,7 @@ import JSZip from 'jszip'
 import { useLanguage } from '../i18n/context'
 import StashableImage from './StashableImage'
 import StashDropZone from './StashDropZone'
+import RoninProL7SeamPreview from './RoninProL7SeamPreview'
 
 const { Dragger } = Upload
 const { Text } = Typography
@@ -109,24 +110,129 @@ interface Region {
   h: number
 }
 
-/** 网格均匀切分 */
-function splitSpriteSheet(
-  img: HTMLImageElement,
-  cols: number,
-  rows: number
-): HTMLCanvasElement[] {
-  const fullW = img.naturalWidth
-  const fullH = img.naturalHeight
-  const colsNum = Math.max(1, Math.floor(cols))
-  const rowsNum = Math.max(1, Math.floor(rows))
-  const results: HTMLCanvasElement[] = []
+/** 一行像素 Alpha 之和；越小表示该横线越像「缝」、越不容易切断肢体 */
+function rowAlphaSum(data: Uint8ClampedArray, width: number, y: number): number {
+  let s = 0
+  const o = y * width * 4
+  for (let x = 0; x < width; x++) {
+    s += data[o + x * 4 + 3]!
+  }
+  return s
+}
 
+function colAlphaSum(data: Uint8ClampedArray, width: number, height: number, x: number): number {
+  let s = 0
+  for (let y = 0; y < height; y++) {
+    s += data[(y * width + x) * 4 + 3]!
+  }
+  return s
+}
+
+/**
+ * L7：在相邻两格名义分界附近做小范围搜索，取整行/整列 Alpha 和最小的切线，
+ * 常用于手/尾巴伸入邻格时，避免均分线正好劈在笔画中间。
+ */
+function uniformRowStarts(fullH: number, rowsNum: number): number[] {
+  return Array.from({ length: rowsNum + 1 }, (_, i) =>
+    i === rowsNum ? fullH : Math.floor((i * fullH) / rowsNum)
+  )
+}
+
+function uniformColStarts(fullW: number, colsNum: number): number[] {
+  return Array.from({ length: colsNum + 1 }, (_, j) =>
+    j === colsNum ? fullW : Math.floor((j * fullW) / colsNum)
+  )
+}
+
+function adjustRowBoundariesL7(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  rowsNum: number,
+  bandRatio = 0.25
+): number[] {
+  const starts: number[] = []
+  for (let i = 0; i <= rowsNum; i++) {
+    starts.push(Math.floor((i * height) / rowsNum))
+  }
+  starts[0] = 0
+  starts[rowsNum] = height
+
+  for (let i = 1; i < rowsNum; i++) {
+    const yNom = starts[i]!
+    const prev = starts[i - 1]!
+    const next = starts[i + 1]!
+    const span = next - prev
+    const band = Math.max(4, Math.min(64, Math.floor(span * bandRatio)))
+    const yMin = Math.max(prev + 1, yNom - band)
+    const yMax = Math.min(next - 1, yNom + band)
+    if (yMin >= yMax) continue
+    let bestY = yNom
+    let bestCost = Infinity
+    for (let y = yMin; y <= yMax; y++) {
+      const c = rowAlphaSum(data, width, y)
+      if (c < bestCost || (c === bestCost && Math.abs(y - yNom) < Math.abs(bestY - yNom))) {
+        bestCost = c
+        bestY = y
+      }
+    }
+    starts[i] = bestY
+  }
+  return starts
+}
+
+function adjustColBoundariesL7(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  colsNum: number,
+  bandRatio = 0.25
+): number[] {
+  const starts: number[] = []
+  for (let j = 0; j <= colsNum; j++) {
+    starts.push(Math.floor((j * width) / colsNum))
+  }
+  starts[0] = 0
+  starts[colsNum] = width
+
+  for (let j = 1; j < colsNum; j++) {
+    const xNom = starts[j]!
+    const prev = starts[j - 1]!
+    const next = starts[j + 1]!
+    const span = next - prev
+    const band = Math.max(2, Math.min(64, Math.floor(span * bandRatio)))
+    const xMin = Math.max(prev + 1, xNom - band)
+    const xMax = Math.min(next - 1, xNom + band)
+    if (xMin >= xMax) continue
+    let bestX = xNom
+    let bestCost = Infinity
+    for (let x = xMin; x <= xMax; x++) {
+      const c = colAlphaSum(data, width, height, x)
+      if (c < bestCost || (c === bestCost && Math.abs(x - xNom) < Math.abs(bestX - xNom))) {
+        bestCost = c
+        bestX = x
+      }
+    }
+    starts[j] = bestX
+  }
+  return starts
+}
+
+/** 按已算好的横纵切线切分 */
+function splitSpriteSheetWithStarts(
+  img: HTMLImageElement,
+  colStarts: number[],
+  rowStarts: number[]
+): HTMLCanvasElement[] {
+  const colsNum = colStarts.length - 1
+  const rowsNum = rowStarts.length - 1
+  const results: HTMLCanvasElement[] = []
   for (let row = 0; row < rowsNum; row++) {
     for (let col = 0; col < colsNum; col++) {
-      const sx = Math.floor((col * fullW) / colsNum)
-      const ex = Math.floor(((col + 1) * fullW) / colsNum)
-      const sy = Math.floor((row * fullH) / rowsNum)
-      const ey = Math.floor(((row + 1) * fullH) / rowsNum)
+      const sx = colStarts[col]!
+      const ex = colStarts[col + 1]!
+      const sy = rowStarts[row]!
+      const ey = rowStarts[row + 1]!
       const w = Math.max(1, ex - sx)
       const h = Math.max(1, ey - sy)
       const c = document.createElement('canvas')
@@ -137,6 +243,246 @@ function splitSpriteSheet(
     }
   }
   return results
+}
+
+/** 同一行带内所有竖线同时加同一 offset 时，offset 的可行区间（像素，整数） */
+function bandColOffsetBounds(colStarts: number[], fullW: number): { min: number; max: number } {
+  const n = colStarts.length
+  if (n < 2) return { min: 0, max: 0 }
+  let lo = -Infinity
+  let hi = Infinity
+  for (let j = 1; j < n - 1; j++) {
+    lo = Math.max(lo, colStarts[j - 1]! + 1 - colStarts[j]!)
+    hi = Math.min(hi, colStarts[j + 1]! - 1 - colStarts[j]!)
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) return { min: 0, max: 0 }
+  return { min: Math.ceil(lo), max: Math.floor(hi) }
+}
+
+function segColXWithBandOff(
+  bandOff: number,
+  j: number,
+  colStarts: number[],
+  fullW: number
+): number {
+  if (j <= 0) return 0
+  if (j >= colStarts.length - 1) return fullW
+  return colStarts[j]! + bandOff
+}
+
+/**
+ * 按行带竖线整体偏移（锯齿）：第 r 行带内竖线 x = colStarts[j] + bandColOffset[r]，
+ * 行带之间可在横缝处形成阶梯错位。
+ */
+function splitSpriteSheetWithBandOffsets(
+  img: HTMLImageElement,
+  colStarts: number[],
+  rowStarts: number[],
+  bandColOffset: number[]
+): HTMLCanvasElement[] {
+  const colsNum = colStarts.length - 1
+  const rowsNum = rowStarts.length - 1
+  if (bandColOffset.length !== rowsNum) {
+    throw new Error('bandColOffset length must equal row count')
+  }
+  const fullW = img.naturalWidth
+  const results: HTMLCanvasElement[] = []
+  for (let row = 0; row < rowsNum; row++) {
+    const off = bandColOffset[row] ?? 0
+    for (let col = 0; col < colsNum; col++) {
+      const sx = segColXWithBandOff(off, col, colStarts, fullW)
+      const ex = segColXWithBandOff(off, col + 1, colStarts, fullW)
+      const sy = rowStarts[row]!
+      const ey = rowStarts[row + 1]!
+      const w = Math.max(1, ex - sx)
+      const h = Math.max(1, ey - sy)
+      const c = document.createElement('canvas')
+      c.width = w
+      c.height = h
+      c.getContext('2d')!.drawImage(img, sx, sy, w, h, 0, 0, w, h)
+      results.push(c)
+    }
+  }
+  return results
+}
+
+/** 单行条带：竖线先沿名义 x 下到拐点 y=L，再水平偏移 dx，再垂直到底；每格为七边形/梯形裁切 */
+function buildStripCellVertices(
+  xL: number,
+  xR: number,
+  L: number,
+  H: number,
+  dx: number
+): [number, number][] {
+  const Lc = Math.max(0, Math.min(H, Math.floor(L)))
+  const d = Math.round(dx)
+  if (Lc <= 0) {
+    return [
+      [xL, 0],
+      [xR, 0],
+      [xR + d, H],
+      [xL + d, H],
+    ]
+  }
+  if (Lc >= H) {
+    return [
+      [xL, 0],
+      [xR, 0],
+      [xR, H],
+      [xL, H],
+    ]
+  }
+  return [
+    [xL, 0],
+    [xR, 0],
+    [xR, Lc],
+    [xR + d, Lc],
+    [xR + d, H],
+    [xL + d, H],
+    [xL, Lc],
+  ]
+}
+
+/** 单行折线：水平偏移上限（避免格宽被挤没） */
+function maxPolyDeltaX(colStarts: number[], fullW: number): number {
+  const n = colStarts.length
+  if (n < 2) return 1
+  let minW = Infinity
+  for (let c = 0; c < n - 1; c++) {
+    minW = Math.min(minW, colStarts[c + 1]! - colStarts[c]!)
+  }
+  if (!Number.isFinite(minW) || minW < 1) return 1
+  return Math.max(1, Math.min(Math.floor(fullW / 2) - 1, Math.floor(minW) - 1))
+}
+
+function extractPolygonFromImage(img: HTMLImageElement, verts: [number, number][]): HTMLCanvasElement {
+  const xs = verts.map((v) => v[0])
+  const ys = verts.map((v) => v[1])
+  const minX = Math.max(0, Math.floor(Math.min(...xs)))
+  const maxX = Math.min(img.naturalWidth, Math.ceil(Math.max(...xs)))
+  const minY = Math.max(0, Math.floor(Math.min(...ys)))
+  const maxY = Math.min(img.naturalHeight, Math.ceil(Math.max(...ys)))
+  const w = Math.max(1, maxX - minX)
+  const h = Math.max(1, maxY - minY)
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const ctx = c.getContext('2d')!
+  ctx.imageSmoothingEnabled = false
+  ctx.save()
+  ctx.beginPath()
+  ctx.moveTo(verts[0]![0] - minX, verts[0]![1] - minY)
+  for (let i = 1; i < verts.length; i++) {
+    ctx.lineTo(verts[i]![0] - minX, verts[i]![1] - minY)
+  }
+  ctx.closePath()
+  ctx.clip()
+  ctx.drawImage(img, -minX, -minY)
+  ctx.restore()
+  return c
+}
+
+/**
+ * L7 折线格裁切：拐点在条带内部时，格 = 上下两个轴对齐矩形，用两次 drawImage 1:1 拷贝，
+ * 避免 polygon clip 在斜边上的抗锯齿导致拐点下方像素发糊。
+ */
+function extractStripCellCrisp(
+  img: HTMLImageElement,
+  xL: number,
+  xR: number,
+  bendY: number,
+  fullH: number,
+  deltaX: number
+): HTMLCanvasElement {
+  const H = fullH
+  const Lc = Math.max(0, Math.min(H, Math.floor(bendY)))
+  const d = Math.round(deltaX)
+  const sw = xR - xL
+  if (sw < 1) {
+    const c = document.createElement('canvas')
+    c.width = 1
+    c.height = Math.max(1, H)
+    return c
+  }
+
+  if (Lc >= H) {
+    const minX = Math.max(0, xL)
+    const w = Math.max(1, Math.min(img.naturalWidth, xR) - minX)
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = H
+    const ctx = c.getContext('2d')!
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(img, xL, 0, sw, H, xL - minX, 0, sw, H)
+    return c
+  }
+
+  if (Lc <= 0) {
+    const verts = buildStripCellVertices(xL, xR, bendY, H, deltaX)
+    return extractPolygonFromImage(img, verts)
+  }
+
+  const minX = Math.max(0, Math.min(xL, xL + d, xR, xR + d))
+  const maxX = Math.min(img.naturalWidth, Math.max(xL, xL + d, xR, xR + d))
+  const w = Math.max(1, maxX - minX)
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = H
+  const ctx = c.getContext('2d')!
+  ctx.imageSmoothingEnabled = false
+  const sh1 = Lc
+  const sh2 = H - Lc
+  ctx.drawImage(img, xL, 0, sw, sh1, xL - minX, 0, sw, sh1)
+  ctx.drawImage(img, xL + d, Lc, sw, sh2, xL + d - minX, Lc, sw, sh2)
+  return c
+}
+
+function splitSpriteSheetSingleRowPolyline(
+  img: HTMLImageElement,
+  colStarts: number[],
+  fullH: number,
+  bendY: number,
+  deltaX: number
+): HTMLCanvasElement[] {
+  const colsNum = colStarts.length - 1
+  const H = fullH
+  const results: HTMLCanvasElement[] = []
+  for (let col = 0; col < colsNum; col++) {
+    const xL = colStarts[col]!
+    const xR = colStarts[col + 1]!
+    results.push(extractStripCellCrisp(img, xL, xR, bendY, H, deltaX))
+  }
+  return results
+}
+
+/** 网格均匀切分；可选 L7 在名义接缝附近优化横纵切线 */
+function splitSpriteSheet(
+  img: HTMLImageElement,
+  cols: number,
+  rows: number,
+  l7?: ImageData | null,
+  bandRatio = 0.25
+): HTMLCanvasElement[] {
+  const fullW = img.naturalWidth
+  const fullH = img.naturalHeight
+  const colsNum = Math.max(1, Math.floor(cols))
+  const rowsNum = Math.max(1, Math.floor(rows))
+
+  let colStarts: number[]
+  let rowStarts: number[]
+  if (
+    l7 &&
+    l7.width === fullW &&
+    l7.height === fullH &&
+    (rowsNum > 1 || colsNum > 1)
+  ) {
+    rowStarts = adjustRowBoundariesL7(l7.data, fullW, fullH, rowsNum, bandRatio)
+    colStarts = adjustColBoundariesL7(l7.data, fullW, fullH, colsNum, bandRatio)
+  } else {
+    rowStarts = uniformRowStarts(fullH, rowsNum)
+    colStarts = uniformColStarts(fullW, colsNum)
+  }
+  return splitSpriteSheetWithStarts(img, colStarts, rowStarts)
 }
 
 /** 按自定义区域切分 */
@@ -216,8 +562,36 @@ export default function RoninProCustomSlice() {
   const [expandLeft, setExpandLeft] = useState(0)
   const [expandRight, setExpandRight] = useState(0)
   const [expandMode, setExpandMode] = useState<'all' | 'heightUpOnly'>('all')
+  /** L7：接缝附近沿 Alpha 低谷微调切线（网格 + 智能检测） */
+  const [sliceL7, setSliceL7] = useState(false)
+  /** L7 预览：用户可调切线后再 `splitSpriteSheetWithStarts` */
+  const [previewRowStarts, setPreviewRowStarts] = useState<number[] | null>(null)
+  const [previewColStarts, setPreviewColStarts] = useState<number[] | null>(null)
+  const [previewMeta, setPreviewMeta] = useState<{
+    w: number
+    h: number
+    cols: number
+    rows: number
+  } | null>(null)
+  /** L7 搜索带宽度，占相邻两格合并跨度比例（%） */
+  const [l7BandPercent, setL7BandPercent] = useState(25)
+  /** 每行带内竖线整体 X 偏移（锯齿）；长度 = 行带数；第 0、1 带由同一控件同步 */
+  const [l7BandColOffset, setL7BandColOffset] = useState<number[]>([])
+  /** 单行 L7 折线：从顶到拐点的高度、拐点处水平偏移（像素，可负） */
+  const [l7PolyBendY, setL7PolyBendY] = useState(32)
+  const [l7PolyDeltaX, setL7PolyDeltaX] = useState(0)
+
+  const clearL7Preview = () => {
+    setPreviewRowStarts(null)
+    setPreviewColStarts(null)
+    setPreviewMeta(null)
+    setL7BandColOffset([])
+    setL7PolyBendY(32)
+    setL7PolyDeltaX(0)
+  }
 
   useEffect(() => {
+    clearL7Preview()
     if (spriteFile) {
       const url = URL.createObjectURL(spriteFile)
       setSpritePreviewUrl(url)
@@ -264,8 +638,125 @@ export default function RoninProCustomSlice() {
 
   useEffect(() => {
     if (!spriteFile || activeTab !== 'auto') return
+    if (sliceL7) return
     void runSplit()
-  }, [spriteFile, activeTab])
+  }, [spriteFile, activeTab, sliceL7])
+
+  useEffect(() => {
+    if (!sliceL7) clearL7Preview()
+  }, [sliceL7])
+
+  useEffect(() => {
+    if (!previewMeta || !sliceL7) return
+    if (activeTab === 'grid' && (columns !== previewMeta.cols || rows !== previewMeta.rows)) {
+      clearL7Preview()
+    }
+  }, [columns, rows, activeTab, previewMeta, sliceL7])
+
+  const setPreviewRowBoundary = (i: number, y: number) => {
+    setPreviewRowStarts((prev) => {
+      if (!prev) return prev
+      const next = [...prev]
+      const lo = next[i - 1]! + 1
+      const hi = next[i + 1]! - 1
+      if (lo >= hi) return prev
+      next[i] = Math.max(lo, Math.min(hi, Math.floor(y)))
+      return next
+    })
+  }
+
+  const setPreviewColBoundary = (j: number, x: number) => {
+    setPreviewColStarts((prev) => {
+      if (!prev) return prev
+      const next = [...prev]
+      const lo = next[j - 1]! + 1
+      const hi = next[j + 1]! - 1
+      if (lo >= hi) return prev
+      next[j] = Math.max(lo, Math.min(hi, Math.floor(x)))
+      return next
+    })
+  }
+
+  const setL7BandColOffsetBand = (bandIndex: number, value: number) => {
+    if (!previewColStarts || !previewMeta) return
+    const { min, max } = bandColOffsetBounds(previewColStarts, previewMeta.w)
+    const v = Math.max(min, Math.min(max, Math.floor(value)))
+    const rowsN = previewMeta.rows
+    setL7BandColOffset((prev) => {
+      const next = Array.from({ length: rowsN }, (_, i) => prev[i] ?? 0)
+      if (rowsN >= 2 && (bandIndex === 0 || bandIndex === 1)) {
+        next[0] = v
+        next[1] = v
+      } else {
+        next[bandIndex] = v
+      }
+      return next
+    })
+  }
+
+  const computeL7Preview = async (mode: 'l7' | 'uniform') => {
+    if (!spriteFile) return
+    setLoading(true)
+    try {
+      const buf = await spriteFile.arrayBuffer()
+      const url = URL.createObjectURL(new Blob([buf]))
+      const img = await new Promise<HTMLImageElement>((res, rej) => {
+        const i = new Image()
+        i.onload = () => res(i)
+        i.onerror = () => rej(new Error('load'))
+        i.src = url
+      })
+      URL.revokeObjectURL(url)
+
+      const canvas = document.createElement('canvas')
+      canvas.width = img.naturalWidth
+      canvas.height = img.naturalHeight
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(img, 0, 0)
+      const srcData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+
+      let colsC = columns
+      let rowsC = rows
+      if (activeTab === 'auto') {
+        const d = detectAutoSplit(srcData)
+        colsC = d.cols
+        rowsC = d.rows
+        setColumns(d.cols)
+        setRows(d.rows)
+      }
+
+      const br = l7BandPercent / 100
+      let rowStarts: number[]
+      let colStarts: number[]
+      if (rowsC === 1) {
+        rowStarts = [0, img.naturalHeight]
+        colStarts = uniformColStarts(img.naturalWidth, colsC)
+        setL7PolyBendY(Math.floor(img.naturalHeight / 2))
+        setL7PolyDeltaX(0)
+      } else if (mode === 'uniform') {
+        rowStarts = uniformRowStarts(img.naturalHeight, rowsC)
+        colStarts = uniformColStarts(img.naturalWidth, colsC)
+      } else {
+        rowStarts = adjustRowBoundariesL7(srcData.data, img.naturalWidth, img.naturalHeight, rowsC, br)
+        colStarts = adjustColBoundariesL7(srcData.data, img.naturalWidth, img.naturalHeight, colsC, br)
+      }
+
+      setPreviewRowStarts(rowStarts)
+      setPreviewColStarts(colStarts)
+      setPreviewMeta({
+        w: img.naturalWidth,
+        h: img.naturalHeight,
+        cols: colsC,
+        rows: rowsC,
+      })
+      setL7BandColOffset(Array.from({ length: rowsC }, () => 0))
+      message.success(t('roninProCustomSliceL7PreviewDone'))
+    } catch (e) {
+      message.error(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const addRegion = () => {
     setRegions((prev) => [
@@ -301,22 +792,72 @@ export default function RoninProCustomSlice() {
       URL.revokeObjectURL(url)
 
       let frames: HTMLCanvasElement[]
-      if (activeTab === 'auto') {
+      if (activeTab === 'custom') {
+        frames = splitByRegions(img, regions)
+      } else if (sliceL7) {
+        if (
+          !previewRowStarts ||
+          !previewColStarts ||
+          !previewMeta ||
+          previewMeta.w !== img.naturalWidth ||
+          previewMeta.h !== img.naturalHeight
+        ) {
+          message.warning(t('roninProCustomSliceL7NeedPreview'))
+          setLoading(false)
+          return
+        }
+        if (activeTab === 'grid' && (previewMeta.cols !== columns || previewMeta.rows !== rows)) {
+          message.warning(t('roninProCustomSliceL7PreviewStale'))
+          setLoading(false)
+          return
+        }
+        if (previewMeta.rows === 1) {
+          frames = splitSpriteSheetSingleRowPolyline(
+            img,
+            previewColStarts,
+            previewMeta.h,
+            l7PolyBendY,
+            l7PolyDeltaX
+          )
+        } else {
+          if (
+            l7BandColOffset.length !== previewMeta.rows ||
+            l7BandColOffset.length !== previewRowStarts.length - 1
+          ) {
+            message.warning(t('roninProCustomSliceL7NeedPreview'))
+            setLoading(false)
+            return
+          }
+          frames = splitSpriteSheetWithBandOffsets(
+            img,
+            previewColStarts,
+            previewRowStarts,
+            l7BandColOffset
+          )
+        }
+        if (activeTab === 'auto') {
+          message.success(
+            t('roninProCustomSliceAutoDetected', {
+              cols: previewMeta.cols,
+              rows: previewMeta.rows,
+              n: frames.length,
+            })
+          )
+        }
+      } else if (activeTab === 'auto') {
         const canvas = document.createElement('canvas')
         canvas.width = img.naturalWidth
         canvas.height = img.naturalHeight
         const ctx = canvas.getContext('2d')!
         ctx.drawImage(img, 0, 0)
         const srcData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-        const { cols, rows } = detectAutoSplit(srcData)
+        const { cols, rows: r0 } = detectAutoSplit(srcData)
         setColumns(cols)
-        setRows(rows)
-        frames = splitSpriteSheet(img, cols, rows)
-        message.success(t('roninProCustomSliceAutoDetected', { cols, rows, n: frames.length }))
-      } else if (activeTab === 'grid') {
-        frames = splitSpriteSheet(img, columns, rows)
+        setRows(r0)
+        frames = splitSpriteSheet(img, cols, r0, null)
+        message.success(t('roninProCustomSliceAutoDetected', { cols, rows: r0, n: frames.length }))
       } else {
-        frames = splitByRegions(img, regions)
+        frames = splitSpriteSheet(img, columns, rows, null)
       }
 
       if (frames.length === 0) {
@@ -347,8 +888,18 @@ export default function RoninProCustomSlice() {
       setFramePreviewUrls(previewUrls)
       const zipBlob = await zip.generateAsync({ type: 'blob' })
       setZipUrl(URL.createObjectURL(zipBlob))
-      const r = activeTab === 'custom' ? Math.max(1, Math.ceil(Math.sqrt(frames.length))) : rows
-      const c = activeTab === 'custom' ? Math.ceil(frames.length / r) : columns
+      const r =
+        activeTab === 'custom'
+          ? Math.max(1, Math.ceil(Math.sqrt(frames.length)))
+          : sliceL7 && previewMeta
+            ? previewMeta.rows
+            : rows
+      const c =
+        activeTab === 'custom'
+          ? Math.ceil(frames.length / r)
+          : sliceL7 && previewMeta
+            ? previewMeta.cols
+            : columns
       setRearrangeRows(r)
       setRearrangeCols(c)
       const grid: number[][] = []
@@ -506,6 +1057,12 @@ export default function RoninProCustomSlice() {
         img.src = url
       })
 
+    const cellBuf = document.createElement('canvas')
+    cellBuf.width = cellW
+    cellBuf.height = cellH
+    const cctx = cellBuf.getContext('2d')!
+    cctx.imageSmoothingEnabled = false
+
     try {
       for (let row = 0; row < rearrangeRows; row++) {
         for (let col = 0; col < rearrangeCols; col++) {
@@ -516,14 +1073,20 @@ export default function RoninProCustomSlice() {
           const dx = col * paddedCellW + expandLeft
           const dy = row * paddedCellH + expandUp
           const flipH = val < 0
+          const w = img.naturalWidth
+          const h = img.naturalHeight
+          cctx.clearRect(0, 0, cellW, cellH)
+          const px = Math.max(0, cellW - w)
+          const py = Math.max(0, Math.floor((cellH - h) / 2))
+          cctx.drawImage(img, 0, 0, w, h, px, py, w, h)
           if (flipH) {
             ctx.save()
             ctx.translate(dx + cellW, dy)
             ctx.scale(-1, 1)
-            ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, cellW, cellH)
+            ctx.drawImage(cellBuf, 0, 0, cellW, cellH, 0, 0, cellW, cellH)
             ctx.restore()
           } else {
-            ctx.drawImage(img, 0, 0, img.width, img.height, dx, dy, cellW, cellH)
+            ctx.drawImage(cellBuf, dx, dy)
           }
         }
       }
@@ -571,6 +1134,17 @@ export default function RoninProCustomSlice() {
   const paddedCellH = cellH + expandUp + expandDown
   const composedOutW = rearrangeCols * paddedCellW
   const composedOutH = rearrangeRows * paddedCellH
+
+  const showL7SeamCanvas =
+    Boolean(
+      spriteFile &&
+        sliceL7 &&
+        activeTab !== 'custom' &&
+        previewMeta &&
+        previewRowStarts &&
+        previewColStarts &&
+        spritePreviewUrl
+    )
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -732,7 +1306,18 @@ export default function RoninProCustomSlice() {
         </Dragger>
       </StashDropZone>
 
-      {spriteFile && spritePreviewUrl && (
+      {spriteFile && activeTab !== 'custom' && (
+        <div>
+          <Checkbox checked={sliceL7} onChange={(e) => setSliceL7(e.target.checked)}>
+            {t('roninProCustomSliceL7')}
+          </Checkbox>
+          <Text type="secondary" style={{ display: 'block', fontSize: 12, paddingLeft: 24, marginTop: 2 }}>
+            {t('roninProCustomSliceL7Hint')}
+          </Text>
+        </div>
+      )}
+
+      {spriteFile && spritePreviewUrl && !showL7SeamCanvas && (
         <>
           <Text strong>{t('imgOriginalPreview')}</Text>
           <div
@@ -753,7 +1338,308 @@ export default function RoninProCustomSlice() {
         </>
       )}
 
-      <Space>
+      {spriteFile && sliceL7 && activeTab !== 'custom' && (
+        <Space direction="vertical" size="small" style={{ width: '100%', maxWidth: 960 }}>
+          <Text strong>{t('roninProCustomSliceL7PreviewTitle')}</Text>
+          {(!previewMeta || previewMeta.rows !== 1) && (
+            <div>
+              <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>
+                {t('roninProCustomSliceL7Band')}
+              </Text>
+              <Slider
+                min={10}
+                max={50}
+                step={1}
+                value={l7BandPercent}
+                onChange={setL7BandPercent}
+                style={{ maxWidth: 280 }}
+                tooltip={{ formatter: (v) => `${v}%` }}
+              />
+            </div>
+          )}
+          <Space wrap>
+            <Button loading={loading} onClick={() => void computeL7Preview('l7')}>
+              {t('roninProCustomSliceL7PreviewL7')}
+            </Button>
+            <Button loading={loading} onClick={() => void computeL7Preview('uniform')}>
+              {t('roninProCustomSliceL7PreviewUniform')}
+            </Button>
+          </Space>
+          {previewMeta && previewRowStarts && previewColStarts && spritePreviewUrl && (
+            <>
+              <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
+                {previewMeta.rows === 1
+                  ? t('roninProCustomSliceL7PolySeamHint')
+                  : t('roninProCustomSliceL7StraightSeams')}
+              </Text>
+              {previewMeta.rows > 1 && (
+                <Text type="warning" style={{ fontSize: 12, display: 'block' }}>
+                  {t('roninProCustomSliceL7PolyMultiRowWarn')}
+                </Text>
+              )}
+              {previewMeta.rows === 1 &&
+                (l7PolyBendY <= 0 || l7PolyBendY >= previewMeta.h) && (
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
+                    {t('roninProCustomSliceL7PolyBendRangeHint')}
+                  </Text>
+                )}
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
+                {previewMeta.rows === 1
+                  ? t('roninProCustomSliceL7PolyDragHint')
+                  : t('roninProCustomSliceL7DragHint')}
+              </Text>
+              <RoninProL7SeamPreview
+                imageUrl={spritePreviewUrl}
+                imageW={previewMeta.w}
+                imageH={previewMeta.h}
+                rowStarts={previewRowStarts}
+                colStarts={previewColStarts}
+                bandColOffset={l7BandColOffset}
+                singleRowPolyline={
+                  previewMeta.rows === 1
+                    ? { bendY: l7PolyBendY, deltaX: l7PolyDeltaX }
+                    : undefined
+                }
+                onRowBoundaryChange={setPreviewRowBoundary}
+                onColBoundaryChange={setPreviewColBoundary}
+              />
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                {previewMeta.rows === 1 &&
+                  (() => {
+                    const dxMax = maxPolyDeltaX(previewColStarts, previewMeta.w)
+                    const bendY = Math.max(0, Math.min(previewMeta.h, Math.round(l7PolyBendY)))
+                    const deltaX = Math.max(-dxMax, Math.min(dxMax, Math.round(l7PolyDeltaX)))
+                    return (
+                      <Space
+                        direction="vertical"
+                        size="small"
+                        style={{ width: '100%', maxWidth: 640, marginBottom: 12 }}
+                      >
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {t('roninProCustomSliceL7PolyParamsTitle')}
+                        </Text>
+                        <div style={{ width: '100%' }}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 8,
+                              flexWrap: 'wrap',
+                              marginBottom: 6,
+                            }}
+                          >
+                            <Text type="secondary" style={{ fontSize: 11, flex: '1 1 200px' }}>
+                              {t('roninProCustomSliceL7PolyBendY')}
+                            </Text>
+                            <InputNumber
+                              size="small"
+                              min={0}
+                              max={previewMeta.h}
+                              value={bendY}
+                              onChange={(v) => v != null && setL7PolyBendY(Math.round(v))}
+                              style={{ width: 96 }}
+                            />
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              {t('roninProCustomSliceL7PolyBendLimit', { h: previewMeta.h })}
+                            </Text>
+                          </div>
+                          <Slider
+                            min={0}
+                            max={previewMeta.h}
+                            step={1}
+                            value={bendY}
+                            onChange={(v) => setL7PolyBendY(v)}
+                            tooltip={{ formatter: (n) => `${n}px` }}
+                          />
+                        </div>
+                        <div style={{ width: '100%' }}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 8,
+                              flexWrap: 'wrap',
+                              marginBottom: 6,
+                            }}
+                          >
+                            <Text type="secondary" style={{ fontSize: 11, flex: '1 1 200px' }}>
+                              {t('roninProCustomSliceL7PolyDeltaX')}
+                            </Text>
+                            <InputNumber
+                              size="small"
+                              min={-dxMax}
+                              max={dxMax}
+                              value={deltaX}
+                              onChange={(v) =>
+                                v != null &&
+                                setL7PolyDeltaX(
+                                  Math.max(-dxMax, Math.min(dxMax, Math.round(v)))
+                                )
+                              }
+                              style={{ width: 96 }}
+                            />
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              {t('roninProCustomSliceL7PolyDeltaLimit', { m: dxMax })}
+                            </Text>
+                          </div>
+                          <Slider
+                            min={-dxMax}
+                            max={dxMax}
+                            step={1}
+                            value={deltaX}
+                            onChange={(v) =>
+                              setL7PolyDeltaX(
+                                Math.max(-dxMax, Math.min(dxMax, Math.round(v)))
+                              )
+                            }
+                            tooltip={{ formatter: (n) => `${n}px` }}
+                          />
+                        </div>
+                      </Space>
+                    )
+                  })()}
+                {previewRowStarts.length > 2 && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {t('roninProCustomSliceL7AdjustH')}
+                  </Text>
+                )}
+                {previewRowStarts.slice(1, -1).map((y, idx) => {
+                  const i = idx + 1
+                  const lo = previewRowStarts[i - 1]! + 1
+                  const hi = previewRowStarts[i + 1]! - 1
+                  return (
+                    <div key={`rh-${i}`} style={{ width: '100%', maxWidth: 640 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                        <Text type="secondary" style={{ fontSize: 12, minWidth: 72 }}>
+                          {t('roninProCustomSliceL7HLine', { i: i + 1 })}
+                        </Text>
+                        <InputNumber
+                          size="small"
+                          min={lo}
+                          max={hi}
+                          value={y}
+                          onChange={(v) => v != null && setPreviewRowBoundary(i, v)}
+                          style={{ width: 88 }}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          Y px ({lo}–{hi})
+                        </Text>
+                      </div>
+                      {lo < hi && (
+                        <Slider
+                          min={lo}
+                          max={hi}
+                          value={y}
+                          onChange={(v) => setPreviewRowBoundary(i, v)}
+                          tooltip={{ formatter: (n) => `${n}` }}
+                        />
+                      )}
+                    </div>
+                  )
+                })}
+                {previewColStarts.length > 2 && (
+                  <Text type="secondary" style={{ fontSize: 12, marginTop: 4 }}>
+                    {t('roninProCustomSliceL7AdjustV')}
+                  </Text>
+                )}
+                {previewColStarts.slice(1, -1).map((x, idx) => {
+                  const j = idx + 1
+                  const lo = previewColStarts[j - 1]! + 1
+                  const hi = previewColStarts[j + 1]! - 1
+                  return (
+                    <div key={`cv-${j}`} style={{ width: '100%', maxWidth: 640 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                        <Text type="secondary" style={{ fontSize: 12, minWidth: 72 }}>
+                          {t('roninProCustomSliceL7VLine', { j: j + 1 })}
+                        </Text>
+                        <InputNumber
+                          size="small"
+                          min={lo}
+                          max={hi}
+                          value={x}
+                          onChange={(v) => v != null && setPreviewColBoundary(j, v)}
+                          style={{ width: 88 }}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          X px ({lo}–{hi})
+                        </Text>
+                      </div>
+                      {lo < hi && (
+                        <Slider
+                          min={lo}
+                          max={hi}
+                          value={x}
+                          onChange={(v) => setPreviewColBoundary(j, v)}
+                          tooltip={{ formatter: (n) => `${n}` }}
+                        />
+                      )}
+                    </div>
+                  )
+                })}
+                {previewMeta.rows > 1 &&
+                  l7BandColOffset.length === previewMeta.rows &&
+                  (() => {
+                    const b = bandColOffsetBounds(previewColStarts, previewMeta.w)
+                    const rowsN = previewMeta.rows
+                    if (b.min > b.max) return null
+                    return (
+                      <Space direction="vertical" size="small" style={{ width: '100%', maxWidth: 640, marginTop: 8 }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {t('roninProCustomSliceL7JaggedTitle')}
+                        </Text>
+                        {rowsN === 2 && (
+                          <>
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              {t('roninProCustomSliceL7Band01Sync')}
+                            </Text>
+                            <Slider
+                              min={b.min}
+                              max={b.max}
+                              value={l7BandColOffset[0] ?? 0}
+                              onChange={(v) => setL7BandColOffsetBand(0, v)}
+                              tooltip={{ formatter: (n) => `${n}px` }}
+                            />
+                          </>
+                        )}
+                        {rowsN >= 3 && (
+                          <>
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              {t('roninProCustomSliceL7Band01Sync')}
+                            </Text>
+                            <Slider
+                              min={b.min}
+                              max={b.max}
+                              value={l7BandColOffset[0] ?? 0}
+                              onChange={(v) => setL7BandColOffsetBand(0, v)}
+                              tooltip={{ formatter: (n) => `${n}px` }}
+                            />
+                            {Array.from({ length: rowsN - 2 }, (_, k) => k + 2).map((bandIdx) => (
+                              <div key={`jag-${bandIdx}`} style={{ width: '100%' }}>
+                                <Text type="secondary" style={{ fontSize: 11 }}>
+                                  {t('roninProCustomSliceL7BandSegOffset', { n: bandIdx + 1 })}
+                                </Text>
+                                <Slider
+                                  min={b.min}
+                                  max={b.max}
+                                  value={l7BandColOffset[bandIdx] ?? 0}
+                                  onChange={(v) => setL7BandColOffsetBand(bandIdx, v)}
+                                  tooltip={{ formatter: (n) => `${n}px` }}
+                                />
+                              </div>
+                            ))}
+                          </>
+                        )}
+                      </Space>
+                    )
+                  })()}
+              </Space>
+            </>
+          )}
+        </Space>
+      )}
+
+      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+        <Space>
         <Button
           type="primary"
           loading={loading}
@@ -763,13 +1649,18 @@ export default function RoninProCustomSlice() {
             (activeTab === 'custom' && regions.length === 0)
           }
         >
-          {activeTab === 'auto' ? t('roninProCustomSliceAutoSplit') : t('spriteSplit')}
+          {sliceL7 && activeTab !== 'custom'
+            ? t('roninProCustomSliceL7ApplySplit')
+            : activeTab === 'auto'
+              ? t('roninProCustomSliceAutoSplit')
+              : t('spriteSplit')}
         </Button>
         {zipUrl && (
           <Button icon={<DownloadOutlined />} onClick={downloadZip}>
             {t('gifDownloadFrames')}
           </Button>
         )}
+        </Space>
       </Space>
 
       {framePreviewUrls.length > 0 && (

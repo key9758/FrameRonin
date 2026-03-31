@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import { Card, Row, Col, Typography, Space, Button } from 'antd'
-import { ArrowsAltOutlined, AppstoreOutlined, BlockOutlined, BugOutlined, FileImageOutlined, PictureOutlined, VideoCameraOutlined, ThunderboltOutlined, BorderOuterOutlined, ScissorOutlined, SafetyOutlined, ShareAltOutlined, ControlOutlined, RocketOutlined } from '@ant-design/icons'
+import { ArrowsAltOutlined, AppstoreOutlined, BlockOutlined, BugOutlined, EnvironmentOutlined, FileImageOutlined, PictureOutlined, VideoCameraOutlined, ThunderboltOutlined, BorderOuterOutlined, ScissorOutlined, SafetyOutlined, ShareAltOutlined, ControlOutlined, RocketOutlined } from '@ant-design/icons'
 import { useAuth } from '../auth/context'
 import { RONIN_PRO_REQUIRE_NFT } from '../config/features'
 import { useNftOwnership } from '../hooks/useNftOwnership'
@@ -89,6 +89,7 @@ export type AppMode =
   | 'controlTest'
   | 'controlTestArcade'
   | 'roninPro'
+  | 'infiniteMap'
   | 'aiPixelAnimals'
   | 'gemPixelPotpourri'
   | null
@@ -548,19 +549,21 @@ export default function ModeSelector({ onSelect }: Props) {
         </Card>
       </Col>
     </Row>
-      {showRoninProCard && (
-        <Row gutter={24} style={{ marginTop: 8, marginBottom: 24 }}>
-          <Col xs={24}>
+      <Row gutter={24} style={{ marginTop: 8, marginBottom: 24 }} align="stretch">
+        {showRoninProCard && (
+          <Col xs={24} md={12} style={{ display: 'flex' }}>
             <Card
               hoverable
               onClick={() => onSelect('roninPro')}
-              styles={{ body: HOME_CARD_BODY_LARGE }}
+              styles={{ body: HOME_CARD_BODY_LARGE_GROW }}
               style={{
                 textAlign: 'center',
                 cursor: 'pointer',
                 borderColor: '#9a8b78',
                 background: 'linear-gradient(135deg, #ede6dc 0%, #e8dfd4 100%)',
                 borderWidth: 2,
+                flex: 1,
+                width: '100%',
               }}
             >
               <RocketOutlined style={{ fontSize: 36, color: '#b55233', marginBottom: 12, display: 'block' }} />
@@ -572,8 +575,32 @@ export default function ModeSelector({ onSelect }: Props) {
               </Text>
             </Card>
           </Col>
-        </Row>
-      )}
+        )}
+        <Col xs={24} md={showRoninProCard ? 12 : 24} style={{ display: 'flex' }}>
+          <Card
+            hoverable
+            onClick={() => onSelect('infiniteMap')}
+            styles={{ body: HOME_CARD_BODY_LARGE_GROW }}
+            style={{
+              textAlign: 'center',
+              cursor: 'pointer',
+              borderColor: '#9a8b78',
+              background: 'linear-gradient(135deg, #ede6dc 0%, #e8dfd4 100%)',
+              borderWidth: 2,
+              flex: 1,
+              width: '100%',
+            }}
+          >
+            <EnvironmentOutlined style={{ fontSize: 36, color: '#b55233', marginBottom: 12, display: 'block' }} />
+            <div style={{ lineHeight: 1.4 }}>
+              <Text strong style={{ fontSize: 15 }}>{t('moduleInfiniteMap')}</Text>
+            </div>
+            <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12, lineHeight: 1.4, ...HOME_DESC_TEXT }}>
+              {t('moduleInfiniteMapDesc')}
+            </Text>
+          </Card>
+        </Col>
+      </Row>
       <Row gutter={24} style={{ marginTop: 8, marginBottom: 24 }} align="stretch">
         <Col xs={24} md={12} style={{ display: 'flex' }}>
           <Card

@@ -1,16 +1,84 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, Checkbox, InputNumber, message, Radio, Slider, Space, Tabs, Typography, Upload } from 'antd'
-import { DownloadOutlined } from '@ant-design/icons'
+import { BorderOutlined, DownloadOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd'
 import { useLanguage } from '../i18n/context'
 import StashableImage from './StashableImage'
 import StashDropZone from './StashDropZone'
+import { maxSafeUpscaleForImage } from '../lib/pixellise/safeUpscale'
 
 const { Dragger } = Upload
 const { Text } = Typography
 
 const IMAGE_ACCEPT = ['.png', '.jpg', '.jpeg', '.webp']
 const IMAGE_MAX_MB = 20
+/** 高级像素化框选：原图像素最小边长 */
+const PREVIEW_SELECTION_MIN_SIDE = 24
+
+type NaturalRect = { x: number; y: number; w: number; h: number }
+
+function clientToNaturalPoint(img: HTMLImageElement, clientX: number, clientY: number): { nx: number; ny: number } {
+  const r = img.getBoundingClientRect()
+  const nw = img.naturalWidth
+  const nh = img.naturalHeight
+  if (nw < 1 || nh < 1 || r.width < 1 || r.height < 1) return { nx: 0, ny: 0 }
+  const nx = ((clientX - r.left) / r.width) * nw
+  const ny = ((clientY - r.top) / r.height) * nh
+  return {
+    nx: Math.max(0, Math.min(nw - 1, nx)),
+    ny: Math.max(0, Math.min(nh - 1, ny)),
+  }
+}
+
+function normalizeNaturalRect(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  nw: number,
+  nh: number,
+): NaturalRect {
+  let x = Math.min(x0, x1)
+  let y = Math.min(y0, y1)
+  let w = Math.abs(x1 - x0)
+  let h = Math.abs(y1 - y0)
+  x = Math.floor(x)
+  y = Math.floor(y)
+  w = Math.ceil(w)
+  h = Math.ceil(h)
+  x = Math.max(0, Math.min(nw - 1, x))
+  y = Math.max(0, Math.min(nh - 1, y))
+  w = Math.min(w, nw - x)
+  h = Math.min(h, nh - y)
+  return { x, y, w: Math.max(1, w), h: Math.max(1, h) }
+}
+
+async function cropImageFileToPngBlob(file: File, rect: NaturalRect): Promise<Blob> {
+  const url = URL.createObjectURL(file)
+  try {
+    const img = await new Promise<HTMLImageElement>((res, rej) => {
+      const i = new Image()
+      i.onload = () => res(i)
+      i.onerror = () => rej(new Error('load'))
+      i.src = url
+    })
+    const nw = img.naturalWidth
+    const nh = img.naturalHeight
+    const x = Math.max(0, Math.min(Math.floor(rect.x), nw - 1))
+    const y = Math.max(0, Math.min(Math.floor(rect.y), nh - 1))
+    const w = Math.max(1, Math.min(Math.ceil(rect.w), nw - x))
+    const h = Math.max(1, Math.min(Math.ceil(rect.h), nh - y))
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    c.getContext('2d')!.drawImage(img, x, y, w, h, 0, 0, w, h)
+    return await new Promise<Blob>((resolve, reject) => {
+      c.toBlob((b) => (b ? resolve(b) : reject(new Error('blob'))), 'image/png')
+    })
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
 
 function rgbToLab(r: number, g: number, b: number): [number, number, number] {
   let x = r / 255, y = g / 255, z = b / 255
@@ -269,7 +337,8 @@ export default function ImagePixelate() {
   const [originalUrl, setOriginalUrl] = useState<string | null>(null)
   const [pixelSize, setPixelSize] = useState(8)
   const [mergeNearbyStrength, setMergeNearbyStrength] = useState(40)
-  const [advUpscale, setAdvUpscale] = useState(4)
+  const [advUpscale, setAdvUpscale] = useState(3)
+  const [advUpscaleCeiling, setAdvUpscaleCeiling] = useState(7)
   const [advColors, setAdvColors] = useState(64)
   const [advScaleResult, setAdvScaleResult] = useState(1)
   const [advTransparent, setAdvTransparent] = useState(false)
@@ -277,6 +346,12 @@ export default function ImagePixelate() {
   const [resultUrl, setResultUrl] = useState<string | null>(null)
   const [resultBlob, setResultBlob] = useState<Blob | null>(null)
   const [loading, setLoading] = useState(false)
+  const [naturalWH, setNaturalWH] = useState<{ w: number; h: number } | null>(null)
+  const [previewSelection, setPreviewSelection] = useState<NaturalRect | null>(null)
+  const [previewSelectActive, setPreviewSelectActive] = useState(false)
+  const [draftSelection, setDraftSelection] = useState<NaturalRect | null>(null)
+  const previewImgRef = useRef<HTMLImageElement>(null)
+  const selectDragRef = useRef<{ nx0: number; ny0: number } | null>(null)
   const urlsRef = useRef({ originalUrl: null as string | null, resultUrl: null as string | null })
   urlsRef.current = { originalUrl, resultUrl }
 
@@ -296,6 +371,82 @@ export default function ImagePixelate() {
     },
     [],
   )
+
+  useEffect(() => {
+    setPreviewSelection(null)
+    setPreviewSelectActive(false)
+    setDraftSelection(null)
+    selectDragRef.current = null
+  }, [file])
+
+  useEffect(() => {
+    if (!file) {
+      setNaturalWH(null)
+      return
+    }
+    let cancelled = false
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      if (cancelled) return
+      setNaturalWH({ w: img.naturalWidth, h: img.naturalHeight })
+    }
+    img.onerror = () => {
+      if (!cancelled) setNaturalWH(null)
+    }
+    img.src = url
+    return () => {
+      cancelled = true
+      img.onload = null
+      img.onerror = null
+      URL.revokeObjectURL(url)
+    }
+  }, [file])
+
+  useEffect(() => {
+    if (!naturalWH) {
+      setAdvUpscaleCeiling(7)
+      return
+    }
+    const w = previewSelection?.w ?? naturalWH.w
+    const h = previewSelection?.h ?? naturalWH.h
+    const maxU = maxSafeUpscaleForImage(w, h)
+    setAdvUpscaleCeiling(maxU)
+    setAdvUpscale((prev) => Math.min(prev, maxU))
+  }, [naturalWH, previewSelection])
+
+  const updateDraftFromPointer = (clientX: number, clientY: number) => {
+    const img = previewImgRef.current
+    const drag = selectDragRef.current
+    if (!img || !drag) return
+    const { nx, ny } = clientToNaturalPoint(img, clientX, clientY)
+    const nw = img.naturalWidth
+    const nh = img.naturalHeight
+    setDraftSelection(normalizeNaturalRect(drag.nx0, drag.ny0, nx, ny, nw, nh))
+  }
+
+  const finishPreviewSelect = (e: React.PointerEvent, clientX: number, clientY: number) => {
+    const img = previewImgRef.current
+    const drag = selectDragRef.current
+    if (!previewSelectActive || !img || !drag) return
+    try {
+      ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+    } catch {
+      /* already released */
+    }
+    const { nx, ny } = clientToNaturalPoint(img, clientX, clientY)
+    const nw = img.naturalWidth
+    const nh = img.naturalHeight
+    const rect = normalizeNaturalRect(drag.nx0, drag.ny0, nx, ny, nw, nh)
+    selectDragRef.current = null
+    setDraftSelection(null)
+    setPreviewSelectActive(false)
+    if (rect.w < PREVIEW_SELECTION_MIN_SIDE || rect.h < PREVIEW_SELECTION_MIN_SIDE) {
+      message.warning(t('pixelatePreviewSelectTooSmall', { n: PREVIEW_SELECTION_MIN_SIDE }))
+      return
+    }
+    setPreviewSelection(rect)
+  }
 
   const runPixelate = async () => {
     if (!file) return
@@ -327,6 +478,14 @@ export default function ImagePixelate() {
 
   const runAdvancedPixellise = async () => {
     if (!file) return
+    if (
+      previewSelection &&
+      (previewSelection.w < PREVIEW_SELECTION_MIN_SIDE ||
+        previewSelection.h < PREVIEW_SELECTION_MIN_SIDE)
+    ) {
+      message.warning(t('pixelatePreviewSelectTooSmall', { n: PREVIEW_SELECTION_MIN_SIDE }))
+      return
+    }
     setLoading(true)
     setAdvStatusKey(null)
     setResultUrl((old) => {
@@ -335,9 +494,15 @@ export default function ImagePixelate() {
     })
     setResultBlob(null)
     try {
+      let workFile: File = file
+      if (previewSelection) {
+        const cropped = await cropImageFileToPngBlob(file, previewSelection)
+        const base = file.name.replace(/\.[^.]+$/, '') || 'region'
+        workFile = new File([cropped], `${base}_region.png`, { type: 'image/png' })
+      }
       const { runPixelliseRestore } = await import('../lib/pixellise/pipeline')
-      const blob = await runPixelliseRestore(
-        file,
+      const { blob, upscaleCapped, upscaleRequested, upscaleUsed } = await runPixelliseRestore(
+        workFile,
         {
           upscale: advUpscale,
           numColors: advColors,
@@ -348,7 +513,14 @@ export default function ImagePixelate() {
       )
       setResultBlob(blob)
       setResultUrl(URL.createObjectURL(blob))
-      message.success(t('pixelateAdvancedSuccess'))
+      if (upscaleCapped) {
+        setAdvUpscale(upscaleUsed)
+        message.success(
+          t('pixelateAdvancedSuccessWithCap', { from: upscaleRequested, to: upscaleUsed }),
+        )
+      } else {
+        message.success(t('pixelateAdvancedSuccess'))
+      }
     } catch (e) {
       message.error(t('pixelateAdvancedFailed') + ': ' + String(e))
     } finally {
@@ -428,6 +600,174 @@ export default function ImagePixelate() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
+      <StashDropZone
+        onStashDrop={(f) => {
+          setFile(f)
+          setResultUrl((old) => {
+            if (old) URL.revokeObjectURL(old)
+            return null
+          })
+          setResultBlob(null)
+        }}
+        maxSizeMB={IMAGE_MAX_MB}
+        onSizeError={() => message.error(t('imageSizeError'))}
+      >
+        <Dragger
+          accept={IMAGE_ACCEPT.join(',')}
+          maxCount={1}
+          fileList={file ? [{ uid: '1', name: file.name } as UploadFile] : []}
+          beforeUpload={(f) => {
+            if (f.size > IMAGE_MAX_MB * 1024 * 1024) {
+              message.error(t('imageSizeError'))
+              return false
+            }
+            setFile(f)
+            setResultUrl((old) => {
+              if (old) URL.revokeObjectURL(old)
+              return null
+            })
+            setResultBlob(null)
+            return false
+          }}
+          onRemove={() => setFile(null)}
+        >
+          <p className="ant-upload-text">{t('imageUploadHint')}</p>
+          <p className="ant-upload-hint">{t('imageFormats')}</p>
+        </Dragger>
+      </StashDropZone>
+      {file && originalUrl && (
+        <>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <Text strong style={{ display: 'block', marginBottom: 0 }}>{t('imgOriginalPreview')}</Text>
+            <Space wrap size="small">
+              <Button
+                size="small"
+                type={previewSelectActive ? 'primary' : 'default'}
+                icon={<BorderOutlined />}
+                disabled={!naturalWH}
+                onClick={() => {
+                  if (previewSelectActive) {
+                    selectDragRef.current = null
+                    setDraftSelection(null)
+                  }
+                  setPreviewSelectActive((a) => !a)
+                }}
+              >
+                {previewSelectActive ? t('pixelatePreviewSelectCancel') : t('pixelatePreviewSelectStart')}
+              </Button>
+              <Button size="small" disabled={!previewSelection} onClick={() => setPreviewSelection(null)}>
+                {t('pixelatePreviewSelectClear')}
+              </Button>
+            </Space>
+          </div>
+          {previewSelectActive && (
+            <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
+              {t('pixelatePreviewSelectHint')}
+            </Text>
+          )}
+          {previewSelection && !previewSelectActive && naturalWH && (
+            <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
+              {t('pixelatePreviewSelectRegionInfo', {
+                w: previewSelection.w,
+                h: previewSelection.h,
+              })}
+            </Text>
+          )}
+          <div
+            style={{
+              padding: 16,
+              width: '100%',
+              boxSizing: 'border-box',
+              background: 'repeating-conic-gradient(#c9bfb0 0% 25%, #e4dbcf 0% 50%) 50% / 16px 16px',
+              borderRadius: 8,
+              border: '1px solid #9a8b78',
+            }}
+          >
+            <div style={{ position: 'relative', display: 'inline-block', maxWidth: '100%', lineHeight: 0 }}>
+              <StashableImage
+                ref={previewImgRef}
+                src={originalUrl}
+                alt=""
+                draggable={!previewSelectActive}
+                style={{
+                  maxWidth: '100%',
+                  width: 'auto',
+                  height: 'auto',
+                  maxHeight: 440,
+                  display: 'block',
+                  imageRendering: 'auto',
+                  verticalAlign: 'top',
+                }}
+              />
+              {naturalWH && previewSelection && !previewSelectActive && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: `${(previewSelection.x / naturalWH.w) * 100}%`,
+                    top: `${(previewSelection.y / naturalWH.h) * 100}%`,
+                    width: `${(previewSelection.w / naturalWH.w) * 100}%`,
+                    height: `${(previewSelection.h / naturalWH.h) * 100}%`,
+                    border: '2px solid #c2410c',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'none',
+                    background: 'rgba(194, 65, 12, 0.12)',
+                  }}
+                />
+              )}
+              {naturalWH && draftSelection && previewSelectActive && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: `${(draftSelection.x / naturalWH.w) * 100}%`,
+                    top: `${(draftSelection.y / naturalWH.h) * 100}%`,
+                    width: `${(draftSelection.w / naturalWH.w) * 100}%`,
+                    height: `${(draftSelection.h / naturalWH.h) * 100}%`,
+                    border: '2px dashed #c2410c',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'none',
+                    background: 'rgba(194, 65, 12, 0.08)',
+                  }}
+                />
+              )}
+              <div
+                role="presentation"
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  cursor: previewSelectActive ? 'crosshair' : 'default',
+                  touchAction: 'none',
+                  pointerEvents: previewSelectActive ? 'auto' : 'none',
+                }}
+                onPointerDown={(e) => {
+                  if (!previewSelectActive || !previewImgRef.current) return
+                  e.preventDefault()
+                  const { nx, ny } = clientToNaturalPoint(previewImgRef.current, e.clientX, e.clientY)
+                  selectDragRef.current = { nx0: nx, ny0: ny }
+                  e.currentTarget.setPointerCapture(e.pointerId)
+                  const nw = previewImgRef.current.naturalWidth
+                  const nh = previewImgRef.current.naturalHeight
+                  setDraftSelection(normalizeNaturalRect(nx, ny, nx, ny, nw, nh))
+                }}
+                onPointerMove={(e) => {
+                  if (selectDragRef.current) updateDraftFromPointer(e.clientX, e.clientY)
+                }}
+                onPointerUp={(e) => {
+                  if (selectDragRef.current) finishPreviewSelect(e, e.clientX, e.clientY)
+                }}
+                onPointerCancel={(e) => {
+                  selectDragRef.current = null
+                  setDraftSelection(null)
+                  try {
+                    e.currentTarget.releasePointerCapture(e.pointerId)
+                  } catch {
+                    /* noop */
+                  }
+                }}
+              />
+            </div>
+          </div>
+        </>
+      )}
       <Tabs
         activeKey={activeTab}
         onChange={(k) => setActiveTab(k as 'pixelate' | 'mergeNearby' | 'color16' | 'advanced')}
@@ -504,20 +844,33 @@ export default function ImagePixelate() {
             label: t('pixelateTabAdvanced'),
             children: (
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                <Text type="secondary" style={{ display: 'block' }}>{t('pixelateAdvancedHint')}</Text>
-                <Text type="secondary" style={{ display: 'block' }}>{t('pixelateAdvancedDesc')}</Text>
+                {previewSelection && (
+                  <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+                    {t('pixelateAdvancedRegionOnly')}
+                  </Text>
+                )}
                 <div>
                   <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>{t('pixelateAdvancedUpscale')}</Text>
                   <Space wrap>
                     <Slider
-                      min={2}
-                      max={7}
+                      min={1}
+                      max={advUpscaleCeiling}
                       step={1}
                       value={advUpscale}
                       onChange={(v) => setAdvUpscale(v as number)}
                       style={{ width: 200, marginRight: 16 }}
                     />
-                    <InputNumber min={2} max={7} value={advUpscale} onChange={(v) => setAdvUpscale(v ?? 4)} style={{ width: 90 }} />
+                    <InputNumber
+                      min={1}
+                      max={advUpscaleCeiling}
+                      value={advUpscale}
+                      onChange={(v) =>
+                        setAdvUpscale(
+                          Math.min(advUpscaleCeiling, Math.max(1, typeof v === 'number' ? v : 3)),
+                        )
+                      }
+                      style={{ width: 90 }}
+                    />
                   </Space>
                   <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>{t('pixelateAdvancedUpscaleHint')}</Text>
                 </div>
@@ -553,62 +906,13 @@ export default function ImagePixelate() {
                 <Checkbox checked={advTransparent} onChange={(e) => setAdvTransparent(e.target.checked)}>
                   {t('pixelateAdvancedTransparent')}
                 </Checkbox>
+                <Text type="secondary" style={{ display: 'block' }}>{t('pixelateAdvancedHint')}</Text>
+                <Text type="secondary" style={{ display: 'block' }}>{t('pixelateAdvancedDesc')}</Text>
               </Space>
             ),
           },
         ]}
       />
-      <StashDropZone
-        onStashDrop={(f) => {
-          setFile(f)
-          setResultUrl((old) => {
-            if (old) URL.revokeObjectURL(old)
-            return null
-          })
-          setResultBlob(null)
-        }}
-        maxSizeMB={IMAGE_MAX_MB}
-        onSizeError={() => message.error(t('imageSizeError'))}
-      >
-        <Dragger
-          accept={IMAGE_ACCEPT.join(',')}
-          maxCount={1}
-          fileList={file ? [{ uid: '1', name: file.name } as UploadFile] : []}
-          beforeUpload={(f) => {
-            if (f.size > IMAGE_MAX_MB * 1024 * 1024) {
-              message.error(t('imageSizeError'))
-              return false
-            }
-            setFile(f)
-            setResultUrl((old) => {
-              if (old) URL.revokeObjectURL(old)
-              return null
-            })
-            setResultBlob(null)
-            return false
-          }}
-          onRemove={() => setFile(null)}
-        >
-          <p className="ant-upload-text">{t('imageUploadHint')}</p>
-          <p className="ant-upload-hint">{t('imageFormats')}</p>
-        </Dragger>
-      </StashDropZone>
-      {file && originalUrl && (
-        <>
-          <Text strong style={{ display: 'block' }}>{t('imgOriginalPreview')}</Text>
-          <div
-            style={{
-              padding: 16,
-              background: 'repeating-conic-gradient(#c9bfb0 0% 25%, #e4dbcf 0% 50%) 50% / 16px 16px',
-              borderRadius: 8,
-              border: '1px solid #9a8b78',
-              display: 'inline-block',
-            }}
-          >
-            <img src={originalUrl} alt="" style={{ maxWidth: 320, maxHeight: 240, display: 'block', imageRendering: 'auto' }} />
-          </div>
-        </>
-      )}
       <Space wrap>
         {activeTab === 'pixelate' && (
           <Button type="primary" loading={loading} onClick={runPixelate} disabled={!file}>

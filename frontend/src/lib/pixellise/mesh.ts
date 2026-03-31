@@ -205,7 +205,7 @@ export interface MeshWithScale {
 export function computeMeshWithScaling(cv: Cv, input: ImageData, upscale: number): MeshWithScale {
   const W = input.width
   const H = input.height
-  const u = Math.max(2, Math.min(7, Math.floor(upscale)))
+  const u = Math.max(1, Math.min(7, Math.floor(upscale)))
   const scaledW = Math.round(W * u)
   const scaledH = Math.round(H * u)
   const upscaled = scaleNearestToSize(input, scaledW, scaledH)

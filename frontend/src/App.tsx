@@ -28,6 +28,7 @@ import ControlTest from './components/ControlTest'
 import RoninPro from './components/RoninPro'
 import AiPixelAnimalsHub from './components/AiPixelAnimalsHub'
 import GemPixelPotpourriHub from './components/GemPixelPotpourriHub'
+import InfiniteMapPlaceholder from './components/InfiniteMapPlaceholder'
 
 const ImageMatte = lazy(() => import('./components/ImageMatte'))
 import ParamsStep from './components/ParamsStep'
@@ -288,7 +289,23 @@ function App() {
         </Header>
         <Content
           className="app-content"
-          style={mode === 'spriteadjust' ? { maxWidth: 1120, width: '100%' } : undefined}
+          style={
+            mode === 'spriteadjust'
+              ? { maxWidth: 1120, width: '100%' }
+              : mode === 'infiniteMap'
+                ? {
+                    width: '80%',
+                    maxWidth: 'none',
+                    marginLeft: 'auto',
+                    marginRight: 'auto',
+                    paddingTop: 12,
+                    paddingBottom: 12,
+                    paddingLeft: 16,
+                    paddingRight: 16,
+                    boxSizing: 'border-box',
+                  }
+                : undefined
+          }
         >
           {mode === null ? (
             <Card>
@@ -485,6 +502,8 @@ function App() {
                 }}
               />
             </Card>
+          ) : mode === 'infiniteMap' ? (
+            <InfiniteMapPlaceholder onBack={() => setMode(null)} />
           ) : mode === 'aiPixelAnimals' ? (
             <AiPixelAnimalsHub onBack={() => setMode(null)} />
           ) : mode === 'gemPixelPotpourri' ? (

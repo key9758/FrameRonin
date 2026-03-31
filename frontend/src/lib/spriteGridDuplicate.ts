@@ -33,6 +33,32 @@ export function splitSpriteSheetGrid(
   return results
 }
 
+/** 将等大的帧按行优先从左到右排成一张精灵图（列数固定，行数向上取整） */
+export function composeSpriteSheetGrid(cells: HTMLCanvasElement[], cols: number): HTMLCanvasElement {
+  const n = cells.length
+  if (n === 0) throw new Error('empty cells')
+  const colsNum = Math.max(1, Math.floor(cols))
+  const rowsNum = Math.max(1, Math.ceil(n / colsNum))
+  const w = cells[0]!.width
+  const h = cells[0]!.height
+  for (let i = 1; i < n; i++) {
+    if (cells[i]!.width !== w || cells[i]!.height !== h) {
+      throw new Error(`Cell size mismatch at index ${i}`)
+    }
+  }
+  const out = document.createElement('canvas')
+  out.width = colsNum * w
+  out.height = rowsNum * h
+  const ctx = out.getContext('2d')!
+  ctx.imageSmoothingEnabled = false
+  for (let i = 0; i < n; i++) {
+    const row = Math.floor(i / colsNum)
+    const col = i % colsNum
+    ctx.drawImage(cells[i]!, col * w, row * h)
+  }
+  return out
+}
+
 function equalRgba(a: Uint8ClampedArray, b: Uint8ClampedArray): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) {

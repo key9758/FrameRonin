@@ -3,16 +3,27 @@ import { fileToImageData, imageDataToPngBlob } from './imageDataOps'
 import { loadOpenCv } from './opencv'
 import { computeMeshWithScaling } from './mesh'
 import { runWorkerProcessing } from './workerBridge'
+import { maxSafeUpscaleForImage } from './safeUpscale'
+
+export { maxSafeUpscaleForImage, PIXELLISE_MAX_SCALED_PIXELS } from './safeUpscale'
 
 function yieldToBrowser(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0))
+}
+
+export interface PixelliseRestoreResult {
+  blob: Blob
+  /** 实际用于网格检测的放大倍数（可能因图片尺寸被自动下调） */
+  upscaleUsed: number
+  upscaleCapped: boolean
+  upscaleRequested: number
 }
 
 export async function runPixelliseRestore(
   file: File,
   options: AdvancedPixelateOptions,
   onStatus: (messageKey: string) => void,
-): Promise<Blob> {
+): Promise<PixelliseRestoreResult> {
   onStatus('pixelateAdvancedProgressLoadImage')
   await yieldToBrowser()
   const input = await fileToImageData(file)
@@ -23,7 +34,10 @@ export async function runPixelliseRestore(
 
   onStatus('pixelateAdvancedProgressMesh')
   await yieldToBrowser()
-  const u = Math.max(2, Math.min(7, Math.floor(options.upscale)))
+  const requested = Math.max(1, Math.min(7, Math.floor(options.upscale)))
+  const maxU = maxSafeUpscaleForImage(input.width, input.height)
+  const u = Math.min(requested, maxU)
+  const upscaleCapped = u < requested
   const { mesh, scaledWidth, scaledHeight } = computeMeshWithScaling(cv, input, u)
 
   onStatus('pixelateAdvancedProgressWorker')
@@ -38,5 +52,6 @@ export async function runPixelliseRestore(
 
   onStatus('pixelateAdvancedProgressEncode')
   await yieldToBrowser()
-  return imageDataToPngBlob(resultImage)
+  const blob = await imageDataToPngBlob(resultImage)
+  return { blob, upscaleUsed: u, upscaleCapped, upscaleRequested: requested }
 }
