@@ -1,12 +1,52 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, ColorPicker, message, Slider, Space, Typography } from 'antd'
-import { AimOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, InboxOutlined, UndoOutlined } from '@ant-design/icons'
+import {
+  AimOutlined,
+  BorderOuterOutlined,
+  DeleteOutlined,
+  DownloadOutlined,
+  EditOutlined,
+  InboxOutlined,
+  UndoOutlined,
+} from '@ant-design/icons'
 import { useLanguage } from '../../i18n/context'
 import { useImageStash } from '../../stash/context'
 
 const { Text } = Typography
 
-type Tool = 'brush' | 'eraser' | 'superEraser'
+type Tool = 'brush' | 'eraser' | 'superEraser' | 'selectMove'
+
+type SelRect = { x: number; y: number; w: number; h: number }
+
+/** 将 chunk 以左上角 (atX,atY) 拷入 dest（全图 ImageData），越界跳过 */
+function blitImageDataInto(
+  dest: ImageData,
+  chunk: ImageData,
+  atX: number,
+  atY: number,
+  cw: number,
+  ch: number,
+) {
+  const sw = chunk.width
+  const sh = chunk.height
+  for (let j = 0; j < sh; j++) {
+    for (let i = 0; i < sw; i++) {
+      const dx = atX + i
+      const dy = atY + j
+      if (dx < 0 || dx >= cw || dy < 0 || dy >= ch) continue
+      const si = (j * sw + i) * 4
+      const di = (dy * cw + dx) * 4
+      dest.data[di] = chunk.data[si]!
+      dest.data[di + 1] = chunk.data[si + 1]!
+      dest.data[di + 2] = chunk.data[si + 2]!
+      dest.data[di + 3] = chunk.data[si + 3]!
+    }
+  }
+}
+
+function pointInSelRect(px: number, py: number, r: SelRect): boolean {
+  return px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h
+}
 
 interface ImageFineEditorProps {
   imageUrl: string
@@ -28,6 +68,15 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
   const [drawing, setDrawing] = useState(false)
   const [panning, setPanning] = useState(false)
   const lastPanRef = useRef({ x: 0, y: 0 })
+  const [selectionRect, setSelectionRect] = useState<SelRect | null>(null)
+  const [marqueeActive, setMarqueeActive] = useState<{ ax: number; ay: number; bx: number; by: number } | null>(null)
+  const [moveDrag, setMoveDrag] = useState<{ scx: number; scy: number; dix: number; diy: number } | null>(null)
+  const selectionRectRef = useRef<SelRect | null>(null)
+  const moveDragRef = useRef<typeof moveDrag>(null)
+  const marqueeRef = useRef<typeof marqueeActive>(null)
+  selectionRectRef.current = selectionRect
+  moveDragRef.current = moveDrag
+  marqueeRef.current = marqueeActive
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null)
   const [loadError, setLoadError] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
@@ -144,6 +193,78 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
       return { x: Math.floor(x), y: Math.floor(y) }
     },
     [offset, displayScale, imgSize]
+  )
+
+  /** 画布像素坐标，越界返回 null（用于点击落笔） */
+  const canvasPxFromClient = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } | null => {
+      if (!containerRef.current || !imgSize) return null
+      const el = containerRef.current
+      const rect = el.getBoundingClientRect()
+      const cx = clientX - rect.left - el.clientLeft
+      const cy = clientY - rect.top - el.clientTop
+      const x = (cx - offset.x) / displayScale
+      const y = (cy - offset.y) / displayScale
+      const ix = Math.floor(x)
+      const iy = Math.floor(y)
+      if (ix < 0 || ix >= imgSize.w || iy < 0 || iy >= imgSize.h) return null
+      return { x: ix, y: iy }
+    },
+    [offset, displayScale, imgSize],
+  )
+
+  /** 框选拖拽：坐标钳在图内 */
+  const canvasPxFromClientClamped = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } | null => {
+      if (!containerRef.current || !imgSize) return null
+      const el = containerRef.current
+      const rect = el.getBoundingClientRect()
+      const cx = clientX - rect.left - el.clientLeft
+      const cy = clientY - rect.top - el.clientTop
+      const x = (cx - offset.x) / displayScale
+      const y = (cy - offset.y) / displayScale
+      const ix = Math.max(0, Math.min(imgSize.w - 1, Math.floor(x)))
+      const iy = Math.max(0, Math.min(imgSize.h - 1, Math.floor(y)))
+      return { x: ix, y: iy }
+    },
+    [offset, displayScale, imgSize],
+  )
+
+  const clearSelectUi = useCallback(() => {
+    setSelectionRect(null)
+    setMarqueeActive(null)
+    setMoveDrag(null)
+  }, [])
+
+  const switchTool = useCallback(
+    (next: Tool) => {
+      if (next !== 'selectMove') clearSelectUi()
+      setTool(next)
+    },
+    [clearSelectUi],
+  )
+
+  const commitSelectMove = useCallback(
+    (sel: SelRect, dix: number, diy: number) => {
+      const canvas = canvasRef.current
+      const ctx = canvas?.getContext('2d')
+      if (!ctx || !imgSize) return
+      const { x: sx, y: sy, w: sw, h: sh } = sel
+      let nx = sx + dix
+      let ny = sy + diy
+      nx = Math.max(0, Math.min(nx, imgSize.w - sw))
+      ny = Math.max(0, Math.min(ny, imgSize.h - sh))
+      if (nx === sx && ny === sy) return
+      pushHistory()
+      const full = ctx.getImageData(0, 0, imgSize.w, imgSize.h)
+      const chunk = ctx.getImageData(sx, sy, sw, sh)
+      const hole = new ImageData(sw, sh)
+      blitImageDataInto(full, hole, sx, sy, imgSize.w, imgSize.h)
+      blitImageDataInto(full, chunk, nx, ny, imgSize.w, imgSize.h)
+      ctx.putImageData(full, 0, 0)
+      setSelectionRect({ x: nx, y: ny, w: sw, h: sh })
+    },
+    [imgSize, pushHistory],
   )
 
   const superEraserAt = useCallback(
@@ -274,6 +395,20 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
         e.currentTarget.setPointerCapture(e.pointerId)
         return
       }
+      if (e.button === 0 && tool === 'selectMove') {
+        const p = canvasPxFromClient(e.clientX, e.clientY)
+        if (!p) return
+        const sel = selectionRectRef.current
+        if (sel && pointInSelRect(p.x, p.y, sel)) {
+          setMoveDrag({ scx: e.clientX, scy: e.clientY, dix: 0, diy: 0 })
+          e.currentTarget.setPointerCapture(e.pointerId)
+          return
+        }
+        setSelectionRect(null)
+        setMarqueeActive({ ax: p.x, ay: p.y, bx: p.x, by: p.y })
+        e.currentTarget.setPointerCapture(e.pointerId)
+        return
+      }
       if (e.button === 0) {
         const pt = screenToCanvas(e.clientX, e.clientY)
         if (pt) {
@@ -288,7 +423,7 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
         }
       }
     },
-    [imgSize, tool, screenToCanvas, drawAt, superEraserAt, pushHistory]
+    [imgSize, tool, screenToCanvas, canvasPxFromClient, drawAt, superEraserAt, pushHistory]
   )
 
   const handlePointerMove = useCallback(
@@ -301,26 +436,82 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
         setOffset((off) => ({ x: off.x + dx, y: off.y + dy }))
         return
       }
+      if (marqueeActive) {
+        e.preventDefault()
+        const p = canvasPxFromClientClamped(e.clientX, e.clientY)
+        if (p) setMarqueeActive((m) => (m ? { ...m, bx: p.x, by: p.y } : null))
+        return
+      }
+      if (moveDrag) {
+        e.preventDefault()
+        setMoveDrag((m) => {
+          if (!m) return null
+          return {
+            ...m,
+            dix: Math.round((e.clientX - m.scx) / displayScale),
+            diy: Math.round((e.clientY - m.scy) / displayScale),
+          }
+        })
+        return
+      }
       if (drawing && imgSize && tool !== 'superEraser') {
         e.preventDefault()
         const pt = screenToCanvas(e.clientX, e.clientY)
         if (pt) drawAt(pt.x, pt.y)
       }
     },
-    [panning, drawing, imgSize, tool, screenToCanvas, drawAt]
+    [panning, drawing, imgSize, tool, marqueeActive, moveDrag, displayScale, screenToCanvas, drawAt, canvasPxFromClientClamped]
   )
 
-  const handlePointerUp = useCallback((e: React.PointerEvent) => {
-    if (e.button === 2) {
-      setPanning(false)
-      e.currentTarget.releasePointerCapture(e.pointerId)
-    }
-    if (e.button === 0) setDrawing(false)
-  }, [])
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button === 2) {
+        setPanning(false)
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId)
+        } catch {
+          /* ignore */
+        }
+      }
+      if (e.button === 0) {
+        setDrawing(false)
+        const mq = marqueeRef.current
+        if (mq) {
+          const x0 = Math.min(mq.ax, mq.bx)
+          const y0 = Math.min(mq.ay, mq.by)
+          const x1 = Math.max(mq.ax, mq.bx)
+          const y1 = Math.max(mq.ay, mq.by)
+          const w = x1 - x0 + 1
+          const h = y1 - y0 + 1
+          if (w >= 2 && h >= 2) setSelectionRect({ x: x0, y: y0, w, h })
+          setMarqueeActive(null)
+          try {
+            e.currentTarget.releasePointerCapture(e.pointerId)
+          } catch {
+            /* ignore */
+          }
+        }
+        const md = moveDragRef.current
+        const sel = selectionRectRef.current
+        if (md && sel) {
+          if (md.dix !== 0 || md.diy !== 0) commitSelectMove(sel, md.dix, md.diy)
+          setMoveDrag(null)
+          try {
+            e.currentTarget.releasePointerCapture(e.pointerId)
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    },
+    [commitSelectMove],
+  )
 
   const handlePointerLeave = useCallback(() => {
     setDrawing(false)
     setPanning(false)
+    setMarqueeActive(null)
+    setMoveDrag(null)
   }, [])
 
   useEffect(() => {
@@ -338,6 +529,83 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
   }, [drawing, panning])
 
   useEffect(() => {
+    if (!marqueeActive && !moveDrag) return
+    const onCancel = () => {
+      setMarqueeActive(null)
+      setMoveDrag(null)
+    }
+    window.addEventListener('pointercancel', onCancel)
+    return () => window.removeEventListener('pointercancel', onCancel)
+  }, [marqueeActive, moveDrag])
+
+  /** WASD：与右键拖拽相同，按屏幕像素平移 offset */
+  useEffect(() => {
+    if (!imgSize) return
+    const keys = new Set<string>()
+    let rafId = 0
+    let last = performance.now()
+    const PAN_PX_PER_SEC = 520
+
+    const step = (now: number) => {
+      rafId = requestAnimationFrame(step)
+      const dt = Math.min((now - last) / 1000, 0.05)
+      last = now
+      if (keys.size === 0) return
+      let dx = 0
+      let dy = 0
+      if (keys.has('a')) dx -= PAN_PX_PER_SEC * dt
+      if (keys.has('d')) dx += PAN_PX_PER_SEC * dt
+      if (keys.has('w')) dy -= PAN_PX_PER_SEC * dt
+      if (keys.has('s')) dy += PAN_PX_PER_SEC * dt
+      if (dx === 0 && dy === 0) return
+      setOffset((off) => {
+        const n = { x: off.x + dx, y: off.y + dy }
+        offsetRef.current = n
+        return n
+      })
+    }
+
+    const targetOk = (el: EventTarget | null) => {
+      const t = el as HTMLElement
+      if (!t) return true
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return false
+      if (t.isContentEditable) return false
+      return true
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!targetOk(e.target)) return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const c = e.code
+      if (c !== 'KeyW' && c !== 'KeyA' && c !== 'KeyS' && c !== 'KeyD') return
+      const k = c === 'KeyW' ? 'w' : c === 'KeyA' ? 'a' : c === 'KeyS' ? 's' : 'd'
+      keys.add(k)
+      e.preventDefault()
+    }
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      const c = e.code
+      if (c === 'KeyW') keys.delete('w')
+      else if (c === 'KeyA') keys.delete('a')
+      else if (c === 'KeyS') keys.delete('s')
+      else if (c === 'KeyD') keys.delete('d')
+    }
+
+    const clearKeys = () => keys.clear()
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', clearKeys)
+    rafId = requestAnimationFrame(step)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', clearKeys)
+      cancelAnimationFrame(rafId)
+    }
+  }, [imgSize])
+
+  useEffect(() => {
     if (!imgSize) return
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
@@ -350,6 +618,52 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [imgSize, handleUndo])
+
+  useEffect(() => {
+    if (tool !== 'selectMove') return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+      e.preventDefault()
+      clearSelectUi()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [tool, clearSelectUi])
+
+  /** 框选移动：方向键按像素平移选区（与鼠标拖动同一套 commit）；Shift=大步 8px */
+  useEffect(() => {
+    if (!imgSize || tool !== 'selectMove') return
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)
+        return
+      if (marqueeRef.current || moveDragRef.current) return
+      const sel = selectionRectRef.current
+      if (!sel) return
+      const code = e.code
+      if (
+        code !== 'ArrowUp' &&
+        code !== 'ArrowDown' &&
+        code !== 'ArrowLeft' &&
+        code !== 'ArrowRight'
+      )
+        return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const step = e.shiftKey ? 8 : 1
+      let dx = 0
+      let dy = 0
+      if (code === 'ArrowLeft') dx = -step
+      else if (code === 'ArrowRight') dx = step
+      else if (code === 'ArrowUp') dy = -step
+      else dy = step
+      e.preventDefault()
+      commitSelectMove(sel, dx, dy)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [imgSize, tool, commitSelectMove])
 
   useEffect(() => {
     const el = containerRef.current
@@ -437,23 +751,30 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
           <Button
             type={tool === 'brush' ? 'primary' : 'default'}
             icon={<EditOutlined />}
-            onClick={() => setTool('brush')}
+            onClick={() => switchTool('brush')}
           >
             {t('imgFineEditorBrush')}
           </Button>
           <Button
             type={tool === 'eraser' ? 'primary' : 'default'}
             icon={<DeleteOutlined />}
-            onClick={() => setTool('eraser')}
+            onClick={() => switchTool('eraser')}
           >
             {t('imgFineEditorEraser')}
           </Button>
           <Button
             type={tool === 'superEraser' ? 'primary' : 'default'}
             icon={<AimOutlined />}
-            onClick={() => setTool('superEraser')}
+            onClick={() => switchTool('superEraser')}
           >
             {t('imgFineEditorSuperEraser')}
+          </Button>
+          <Button
+            type={tool === 'selectMove' ? 'primary' : 'default'}
+            icon={<BorderOuterOutlined />}
+            onClick={() => switchTool('selectMove')}
+          >
+            {t('imgFineEditorSelectMove')}
           </Button>
         </Space>
         {tool === 'brush' && (
@@ -480,6 +801,11 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
             <Text type="secondary" style={{ fontSize: 12 }}>{t('imgFineEditorSuperEraserTolerance')}:</Text>
             <Slider min={1} max={100} value={superEraserTolerance} onChange={setSuperEraserTolerance} style={{ width: 80 }} />
           </Space>
+        )}
+        {tool === 'selectMove' && (
+          <Text type="secondary" style={{ fontSize: 12, maxWidth: 420 }}>
+            {t('imgFineEditorSelectMoveHint')}
+          </Text>
         )}
         <Space wrap align="center">
           <Button size="small" type={bgColorEnabled ? 'primary' : 'default'} onClick={() => setBgColorEnabled(true)}>
@@ -512,6 +838,9 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
           </Button>
         </Space>
       </div>
+      <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.5 }}>
+        {t('imgFineEditorViewControls')}
+      </Text>
       <div
         ref={containerRef}
         style={{
@@ -523,7 +852,19 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
           border: '1px solid #9a8b78',
           overflow: 'hidden',
           position: 'relative',
-          cursor: imgSize ? (panning ? 'grabbing' : tool === 'brush' || tool === 'superEraser' ? 'crosshair' : tool === 'eraser' ? eraserCursor() : 'grab') : 'default',
+          cursor: imgSize
+            ? panning
+              ? 'grabbing'
+              : tool === 'selectMove'
+                ? moveDrag
+                  ? 'move'
+                  : 'crosshair'
+                : tool === 'brush' || tool === 'superEraser'
+                  ? 'crosshair'
+                  : tool === 'eraser'
+                    ? eraserCursor()
+                    : 'grab'
+            : 'default',
           touchAction: 'none',
         }}
         onPointerDown={handlePointerDown}
@@ -563,6 +904,52 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
             pointerEvents: 'none',
           }}
         />
+        {imgSize && tool === 'selectMove' && marqueeActive && (() => {
+          const x = Math.min(marqueeActive.ax, marqueeActive.bx)
+          const y = Math.min(marqueeActive.ay, marqueeActive.by)
+          const w = Math.abs(marqueeActive.bx - marqueeActive.ax) + 1
+          const h = Math.abs(marqueeActive.by - marqueeActive.ay) + 1
+          return (
+            <div
+              style={{
+                position: 'absolute',
+                left: offset.x + x * displayScale,
+                top: offset.y + y * displayScale,
+                width: w * displayScale,
+                height: h * displayScale,
+                border: '2px dashed #0ea5e9',
+                boxSizing: 'border-box',
+                pointerEvents: 'none',
+                zIndex: 3,
+                boxShadow: '0 0 0 1px rgba(255,255,255,0.35) inset',
+              }}
+            />
+          )
+        })()}
+        {imgSize && tool === 'selectMove' && selectionRect && !marqueeActive && (() => {
+          const dx = moveDrag?.dix ?? 0
+          const dy = moveDrag?.diy ?? 0
+          let vx = selectionRect.x + dx
+          let vy = selectionRect.y + dy
+          vx = Math.max(0, Math.min(vx, imgSize.w - selectionRect.w))
+          vy = Math.max(0, Math.min(vy, imgSize.h - selectionRect.h))
+          return (
+            <div
+              style={{
+                position: 'absolute',
+                left: offset.x + vx * displayScale,
+                top: offset.y + vy * displayScale,
+                width: selectionRect.w * displayScale,
+                height: selectionRect.h * displayScale,
+                border: '2px dashed #f59e0b',
+                boxSizing: 'border-box',
+                pointerEvents: 'none',
+                zIndex: 3,
+                boxShadow: '0 0 0 1px rgba(0,0,0,0.25) inset',
+              }}
+            />
+          )
+        })()}
       </div>
     </div>
   )
