@@ -1,6 +1,19 @@
 /**
- * public/map/city 小镇布景：固定世界区域内的草地、围栏、建筑与装饰。
- * 与 InfiniteMapScene 世界坐标、透视/俯视一致。
+ * @fileoverview 无限地图「小镇」布景：参数化生成 `CityPropDef[]`，再经世界锚点平移。
+ *
+ * ## 坐标系（本地 → 世界）
+ * - 布局在 **本地坐标** 生成：东西栏以 `ewFenceZCenter` 为 Z 基准，南北栏关于 X=0 对称。
+ * - `offsetCityPropLayout(layout, placeX, placeZ, ewFenceZCenter)` 把本地 `(0, ewFenceZCenter)` 对齐到世界 `(placeX, placeZ)`，
+ *   得到 `InfiniteMapScene` 使用的世界 `wx,wz`。
+ *
+ * ## 生成顺序（`buildCityPropLayout`）
+ * 1. `grassPatches`：围栏内陆草地格点。
+ * 2. `fenceRing`：南北竖栏 + 东西横栏（东西栏可走透视四边形绘制）。
+ * 3. `randomScatterInFence`：箱/火/路灯等小物，数量随内陆面积相对 `CITY_REF_INTERIOR_AREA` 缩放。
+ * 4. `decorAndBuildings`：雪人槽位 + 两栋主建筑，受 `decorJitter` / `buildingWxJitter` 等扰动。
+ *
+ * ## 放置合法性
+ * `findNearestFlatSnowTownPlacement` 在角色附近环上搜索，使围栏脚印内格子均为 **可走平地**（`isBlobTileWalkable`）。
  */
 
 import { isBlobTileWalkable, type BlobWorld } from './blobTerrain'
@@ -33,6 +46,7 @@ export const CITY_EW_FENCE_Z_STEP = 31
 export const CITY_EW_FENCE_Z_HALF_SPAN = CITY_EW_FENCE_Z_STEP
 /** 与矩形基准一致 */
 export const CITY_EW_FENCE_Z_CENTER = CITY_RECT_EW_Z_CENTER
+/** 东西栏三段默认 Z（本地）；段数变化时由 `ewFenceExtentZ` 推导 */
 export const CITY_EW_FENCE_Z_SIDE = [
   CITY_EW_FENCE_Z_CENTER - CITY_EW_FENCE_Z_HALF_SPAN,
   CITY_EW_FENCE_Z_CENTER,
@@ -91,6 +105,8 @@ export const CITY_GEN_DEFAULTS: CityGenParams = {
   buildingWxJitter: 0,
 }
 
+// ---------- 随机（与草地/点缀抖动复现） ----------
+
 function mulberry32(a: number) {
   return function () {
     let t = (a += 0x6d2b79f5)
@@ -100,6 +116,7 @@ function mulberry32(a: number) {
   }
 }
 
+/** UI 滑条 `Partial` 与默认合并 */
 function mergeParams(p: Partial<CityGenParams>): CityGenParams {
   return { ...CITY_GEN_DEFAULTS, ...p }
 }
@@ -169,6 +186,7 @@ function interiorLocalRect(
 }
 
 /** 默认参数下围栏内陆近似面积（用于点缀数量比例）；与 pad≈12 的内陆同一量级 */
+/** 默认参数下围栏内陆面积近似，用于按比例缩放 `cityScatterCount` */
 const CITY_REF_INTERIOR_AREA = 33_500
 
 function grassPatches(g: CityGenParams): CityPropDef[] {
@@ -506,6 +524,10 @@ const CITY_FILES = [
   ...CITY_SCATTER_FILES,
 ]
 
+/**
+ * 加载 `CITY_FILES` 中全部 PNG，按 **文件名** 存入 Map（与 `CityPropDef.file` 对应）。
+ * @returns 取消加载的清理函数。
+ */
 export function loadCityPropImages(onDone: (map: Map<string, HTMLImageElement>) => void): () => void {
   let cancelled = false
   const map = new Map<string, HTMLImageElement>()

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, Checkbox, Slider, Typography } from 'antd'
+import { Button, Checkbox, Select, Slider, Typography } from 'antd'
 import { useLanguage } from '../../i18n/context'
 import { ANIMS, DEFAULT_CHAR_URL, extractFrame, REGIONS } from './infiniteMapSpriteData'
 import {
@@ -35,16 +35,74 @@ import {
   type CityPropDef,
 } from './infiniteMapCity'
 
+/**
+ * @fileoverview 无限地图主场景：程序化地形 + 透视/俯视双模式 + 小镇/树/野怪/粒子/兽人小屋。
+ *
+ * ## 渲染管线（每帧 `gameLoop`）
+ * 1. **地形光栅**：对离屏 `W×H` 逐像素 `screenToWorld` / `screenToWorldTopdown`，`BlobWorld.sampleTileIndex` + 图集 RGB 写入 `ImageData`。
+ * 2. **背景合成**：`ctx.drawImage(off, …)` 裁出下方 16:9 区域（`DISPLAY_H`，去掉 `CROP_TOP`）。
+ * 3. **深度批处理**：小镇道具、树、兽人小屋、野怪、玩家按 **透视 sy**（或俯视 sy）排序后绘制。
+ * 4. **天气粒子**：世界坐标 `wx,wz` + `pixelFallY` 投影（避免与「钉屏中」的角色同动）；`blob` 雪 / `tileg` 樱花 / `tiler` 树叶。
+ * 5. **后处理**：压暗与暗角 `drawScenePostFx`。
+ *
+ * ## 世界与相机
+ * - 世界水平面 **XZ**：`TILE_WORLD` 为格宽；角色 `posRef` 为脚底；相机在 `camZ = pos.z + PLAYER_DZ`，朝 −Z 看（与旧版地图 180° 一致）。
+ * - **透视**公式见 `worldToScreen` / `screenToWorld`（针孔模型 + 行号对应深度）。
+ *
+ * ## 状态与 ref
+ * 动画循环内大量读 `*Ref.current`，避免 `useCallback([state])` 重建 `gameLoop`；与 UI 同步的标量用 `useEffect` 写入 ref。
+ */
 const { Text } = Typography
 
+// ---------- 资源 URL / 地形贴图集切换 ----------
+
 const BGM_URL = `${import.meta.env.BASE_URL}map/ff6.ogg`
-/** 与 public/map/blob/map.html 一致：山 001 / 平地 004 / 水 007；layout 3×24 */
-const BLOB_BASE = `${import.meta.env.BASE_URL}map/blob/`
 const TREE_SNOW_URL = `${import.meta.env.BASE_URL}map/trees/treesnow.png`
-const BLOB_FRAME_MTN = `${BLOB_BASE}frame_001.png`
-const BLOB_FRAME_NORM = `${BLOB_BASE}frame_004.png`
-const BLOB_FRAME_NORM_X1 = `${BLOB_BASE}frame_004X1.png`
-const BLOB_FRAME_NORM_X2 = `${BLOB_BASE}frame_004X2.png`
+const TREE_GRASS_URL = `${import.meta.env.BASE_URL}map/trees/treegrass.png`
+const MONSTER_HUT_URL = `${import.meta.env.BASE_URL}map/monsterhut/monsterhut.png`
+
+/**
+ * Blob 地形贴图集：与 map/blob 一致；
+ * tileg / tiler 为另两套同布局素材（005/006 对应原 004X1/004X2，与 tileg 一致）。
+ */
+export type InfiniteMapTerrainTextureSetId = 'blob' | 'tileg' | 'tiler'
+
+function terrainTextureUrls(id: InfiniteMapTerrainTextureSetId): {
+  mtn: string
+  norm: string
+  normX1: string
+  normX2: string
+  water: string[]
+} {
+  if (id === 'blob') {
+    const base = `${import.meta.env.BASE_URL}map/blob/`
+    return {
+      mtn: `${base}frame_001.png`,
+      norm: `${base}frame_004.png`,
+      normX1: `${base}frame_004X1.png`,
+      normX2: `${base}frame_004X2.png`,
+      water: [`${base}frame_007.png`],
+    }
+  }
+  const folder = id === 'tileg' ? 'tileg' : 'tiler'
+  const base = `${import.meta.env.BASE_URL}map/${folder}/`
+  return {
+    mtn: `${base}frame_001.png`,
+    norm: `${base}frame_004.png`,
+    normX1: `${base}frame_005.png`,
+    normX2: `${base}frame_006.png`,
+    water: [`${base}frame_007.png`],
+  }
+}
+
+/** 与地形套对应的飘落粒子种类 */
+type FallParticleKind = 'snow' | 'petal' | 'leaf'
+
+function fallParticleKindForTerrain(id: InfiniteMapTerrainTextureSetId): FallParticleKind {
+  if (id === 'blob') return 'snow'
+  if (id === 'tileg') return 'petal'
+  return 'leaf'
+}
 /** 平地 004 中与「四周同类」最常见子格对应的图集下标（0-based，即 map 示意里的中心块） */
 const NORM_CENTER_SHEET_INDEX = 4
 /**
@@ -54,12 +112,6 @@ const NORM_CENTER_SHEET_INDEX = 4
  */
 const NORM_CENTER_X1_PERMILLE = 28
 const NORM_CENTER_X2_PERMILLE = 28
-/**
- * 水格贴图：与 map.html 一致为 frame_007。
- * 若日后为同一 3×24 布局增加多帧水动画，可在此追加 URL（勿混入 001/004 山与平地）。
- */
-const BLOB_WATER_ANIM_FRAMES = [`${BLOB_BASE}frame_007.png`]
-
 /** 与 public/map/blob/map.html 滑条一致：value/100 → BlobWorld.seaLevel / mtnTh */
 const TERRAIN_SEA_MIN = 0
 const TERRAIN_SEA_MAX = 58
@@ -87,22 +139,134 @@ const TERRAIN_MIN_ROW = 14
 
 /** 世界格尺寸（blob 地块） */
 const TILE_WORLD = 16
+/** 大地图兽人小屋：数量少、仅可走平地、避开小镇与栏 */
+const MONSTER_HUT_COUNT = 7
+const MONSTER_HUT_MIN_SEP_WORLD = TILE_WORLD * 24
+const MONSTER_HUT_REF_DZ = 102
+const MONSTER_HUT_DISPLAY_SCALE = 1.32
+const MONSTER_HUT_FEET_DOWN_SRC_PX = 10
 const MOVE_SPEED = 1
 const RUN_MUL = 2
+
+// ---------- 飘落粒子（雪 / 樱花 / 树叶，世界坐标 + 屏显下落） ----------
 
 /** FF6 开篇风格：斜飘、远景小点 / 近景大块，整数像素绘制 */
 const FALL_SNOW_COUNT = 340
 type FallLayer = 0 | 1 | 2
+/**
+ * 世界水平坐标 + 屏显下落偏移。若用纯屏幕 x/y，会与始终投影在画面固定处的角色一样「钉在视口上」。
+ */
 type FallFlake = {
-  x: number
-  y: number
-  vx: number
+  wx: number
+  wz: number
+  /** 叠在 worldToScreen 的 sy 上，模拟下落（逻辑像素） */
+  pixelFallY: number
+  /** 屏空间水平漂移（px/s），经 dz/FOCAL 换成世界 wx */
+  vxScreen: number
   vy: number
   wobble: number
   layer: FallLayer
   /** 同层内形状变体（像素图案） */
   variant: number
 }
+
+/**
+ * 在天空射线与地面的交点附近生成新粒子；失败则放在相机前方兜底。
+ * `particleKind` 决定水平/垂直速度与后续摆动参数族。
+ */
+function respawnFallFlake(
+  camX: number,
+  camZ: number,
+  layer: FallLayer,
+  particleKind: FallParticleKind,
+): FallFlake {
+  const slow = layer === 0
+  const mid = layer === 1
+  let vxScreen: number
+  let vy: number
+  if (particleKind === 'snow') {
+    vxScreen = 8 + (slow ? 3 : mid ? 12 : 20) + Math.random() * 14
+    vy = (slow ? 18 : mid ? 42 : 72) + Math.random() * 38
+  } else if (particleKind === 'petal') {
+    vxScreen = 5 + (slow ? 4 : mid ? 12 : 20) + Math.random() * 16
+    vy = (slow ? 11 : mid ? 26 : 44) + Math.random() * 26
+  } else {
+    vxScreen = 6 + (slow ? 6 : mid ? 14 : 22) + Math.random() * 18
+    vy = (slow ? 13 : mid ? 30 : 50) + Math.random() * 28
+  }
+  for (let tries = 0; tries < 24; tries++) {
+    const sx = Math.random() * W
+    const syRow = HORIZON + 4 + Math.random() * 56
+    const hit = screenToWorld(sx + 0.5, syRow + 0.5, camX, camZ)
+    if (!hit) continue
+    return {
+      wx: hit.wx + (Math.random() - 0.5) * 36,
+      wz: hit.wz + (Math.random() - 0.5) * 32,
+      pixelFallY: -(32 + Math.random() * 150),
+      vxScreen,
+      vy,
+      wobble: Math.random() * Math.PI * 2,
+      layer,
+      variant: Math.floor(Math.random() * 16),
+    }
+  }
+  return {
+    wx: camX + (Math.random() - 0.5) * 200,
+    wz: camZ - 60 - Math.random() * 220,
+    pixelFallY: -(40 + Math.random() * 100),
+    vxScreen,
+    vy,
+    wobble: Math.random() * Math.PI * 2,
+    layer,
+    variant: Math.floor(Math.random() * 16),
+  }
+}
+
+/**
+ * 风力用屏空间速度经 `dz/FOCAL` 换到世界 wx；`pixelFallY` 叠加在投影行上模拟下落。
+ * 出界或落到相机后方则 `respawnFallFlake`。
+ */
+function updateFallFlake(
+  f: FallFlake,
+  camX: number,
+  camZ: number,
+  dt: number,
+  t0: number,
+  particleKind: FallParticleKind,
+): FallFlake {
+  let swayAmp: number
+  let twMul: number
+  if (particleKind === 'snow') {
+    swayAmp = f.layer === 0 ? 10 : f.layer === 1 ? 6 : 4
+    twMul = 0.0018
+  } else if (particleKind === 'petal') {
+    swayAmp = f.layer === 0 ? 13 : f.layer === 1 ? 9 : 6
+    twMul = 0.0021
+  } else {
+    swayAmp = f.layer === 0 ? 15 : f.layer === 1 ? 11 : 7
+    twMul = 0.00235
+  }
+  const tw = t0 * twMul
+  let { wx, wz, pixelFallY, vxScreen, vy, wobble, layer, variant } = f
+  const dz = camZ - wz
+  if (dz <= 0) return respawnFallFlake(camX, camZ, layer, particleKind)
+  wx += (dz / FOCAL) * (vxScreen + Math.sin(tw + wobble) * swayAmp) * dt
+  pixelFallY += vy * dt
+  const scr = worldToScreen(wx, wz, camX, camZ)
+  if (!scr || scr.sy < HORIZON - 8) return respawnFallFlake(camX, camZ, layer, particleKind)
+  const syDisp = scr.sy - CROP_TOP + pixelFallY
+  const margin = layer === 2 ? 6 : layer === 1 ? 3 : 2
+  if (
+    syDisp > DISPLAY_H + margin ||
+    scr.sx < -margin - 70 ||
+    scr.sx > W + margin + 70
+  ) {
+    return respawnFallFlake(camX, camZ, layer, particleKind)
+  }
+  return { wx, wz, pixelFallY, vxScreen, vy, wobble, layer, variant }
+}
+
+// ---------- 粒子像素画（按层远/中/近） ----------
 
 function rgbForSnowFlake(layer: FallLayer, wobble: number): [number, number, number] {
   const t = Math.sin(wobble * 0.37) * 14
@@ -190,6 +354,208 @@ function drawSnowNear(
   }
 }
 
+function rgbForPetalFlake(layer: FallLayer, wobble: number): [number, number, number] {
+  const t = Math.sin(wobble * 0.41) * 16
+  if (layer === 0) return [172 + t * 0.4, 128 + t * 0.25, 152 + t * 0.35]
+  if (layer === 1) return [236 + t * 0.35, 186 + t * 0.3, 206 + t * 0.3]
+  return [255, 218 + t * 0.2, 228 + t * 0.18]
+}
+
+function drawPetalFar(ctx: CanvasRenderingContext2D, xi: number, yi: number, rgb: [number, number, number]) {
+  const [r, g, b] = rgb
+  ctx.fillStyle = `rgb(${Math.floor(r)},${Math.floor(g)},${Math.floor(b)})`
+  ctx.fillRect(xi, yi, 1, 2)
+}
+
+function drawPetalMid(ctx: CanvasRenderingContext2D, xi: number, yi: number, rgb: [number, number, number]) {
+  const [r0, g0, b0] = rgb
+  const r = Math.floor(r0)
+  const g = Math.floor(g0)
+  const b = Math.floor(b0)
+  ctx.fillStyle = `rgb(${r},${g},${b})`
+  ctx.fillRect(xi, yi, 4, 1)
+  ctx.fillStyle = `rgb(${Math.min(255, r + 36)},${Math.min(255, g + 28)},${Math.min(255, b + 22)})`
+  ctx.fillRect(xi + 1, yi - 1, 2, 1)
+}
+
+function drawPetalNear(
+  ctx: CanvasRenderingContext2D,
+  xi: number,
+  yi: number,
+  rgb: [number, number, number],
+  variant: number,
+  cw: number,
+  ch: number,
+) {
+  const [r0, g0, b0] = rgb
+  const r = Math.floor(r0)
+  const g = Math.floor(g0)
+  const b = Math.floor(b0)
+  const rHi = Math.min(255, r + 40)
+  const gHi = Math.min(255, g + 32)
+  const bHi = Math.min(255, b + 26)
+  const pat = variant % 4
+  const plot = (dx: number, dy: number, hi: boolean) => {
+    const x = xi + dx
+    const y = yi + dy
+    if (x < 0 || x >= cw || y < 0 || y >= ch) return
+    ctx.fillStyle = hi ? `rgb(${rHi},${gHi},${bHi})` : `rgb(${r},${g},${b})`
+    ctx.fillRect(x, y, 1, 1)
+  }
+  if (pat === 0) {
+    for (let dx = 0; dx < 5; dx++) plot(dx, 1, dx === 2 || dx === 3)
+    plot(1, 0, true)
+    plot(3, 0, true)
+    plot(2, 2, false)
+  } else if (pat === 1) {
+    const pts: [number, number][] = [
+      [0, 1],
+      [1, 1],
+      [2, 1],
+      [3, 1],
+      [4, 1],
+      [1, 0],
+      [2, 0],
+      [3, 0],
+      [2, 2],
+    ]
+    for (let i = 0; i < pts.length; i++) {
+      const [dx, dy] = pts[i]!
+      plot(dx, dy, i % 3 === 0)
+    }
+  } else if (pat === 2) {
+    for (let dx = 0; dx < 4; dx++) plot(dx, 1, dx >= 1 && dx <= 2)
+    plot(0, 0, false)
+    plot(3, 0, false)
+    plot(1, 2, true)
+    plot(2, 2, true)
+  } else {
+    for (let dx = 0; dx < 6; dx++) plot(dx, 2, dx === 2 || dx === 3)
+    plot(1, 1, true)
+    plot(4, 1, true)
+    plot(2, 3, false)
+    plot(3, 3, false)
+  }
+}
+
+function rgbForLeafFlake(layer: FallLayer, wobble: number): [number, number, number] {
+  const t = Math.sin(wobble * 0.33) * 20
+  const u = Math.cos(wobble * 0.51) * 14
+  const autumn = Math.sin(wobble * 0.17) > 0.65 ? 1 : 0
+  if (layer === 0) {
+    if (autumn) return [88 + t * 0.2, 112 + u * 0.15, 42 + t * 0.15]
+    return [38 + t * 0.2, 98 + u * 0.18, 44 + t * 0.18]
+  }
+  if (layer === 1) {
+    if (autumn) return [118 + t * 0.25, 142 + u * 0.2, 48 + t * 0.2]
+    return [62 + t * 0.28, 154 + u * 0.25, 52 + t * 0.22]
+  }
+  if (autumn) return [148 + t * 0.3, 168 + u * 0.25, 58 + t * 0.22]
+  return [78 + t * 0.32, 188 + u * 0.3, 58 + t * 0.28]
+}
+
+function drawLeafFar(ctx: CanvasRenderingContext2D, xi: number, yi: number, rgb: [number, number, number]) {
+  const [r, g, b] = rgb
+  const rf = Math.floor(r)
+  const gf = Math.floor(g)
+  const bf = Math.floor(b)
+  ctx.fillStyle = `rgb(${rf},${gf},${bf})`
+  ctx.fillRect(xi, yi, 1, 1)
+  ctx.fillStyle = `rgb(${Math.min(255, rf + 18)},${Math.min(255, gf + 22)},${Math.min(255, bf + 10)})`
+  ctx.fillRect(xi + 1, yi - 1, 1, 1)
+}
+
+function drawLeafMid(ctx: CanvasRenderingContext2D, xi: number, yi: number, rgb: [number, number, number]) {
+  const [r0, g0, b0] = rgb
+  const r = Math.floor(r0)
+  const g = Math.floor(g0)
+  const b = Math.floor(b0)
+  const rHi = Math.min(255, r + 28)
+  const gHi = Math.min(255, g + 32)
+  const bHi = Math.min(255, b + 16)
+  const plot = (dx: number, dy: number, hi: boolean) => {
+    ctx.fillStyle = hi ? `rgb(${rHi},${gHi},${bHi})` : `rgb(${r},${g},${b})`
+    ctx.fillRect(xi + dx, yi + dy, 1, 1)
+  }
+  plot(0, 1, false)
+  plot(1, 1, true)
+  plot(2, 1, false)
+  plot(1, 0, true)
+  plot(2, 0, false)
+  plot(1, 2, false)
+}
+
+function drawLeafNear(
+  ctx: CanvasRenderingContext2D,
+  xi: number,
+  yi: number,
+  rgb: [number, number, number],
+  variant: number,
+  cw: number,
+  ch: number,
+) {
+  const [r0, g0, b0] = rgb
+  const r = Math.floor(r0)
+  const g = Math.floor(g0)
+  const b = Math.floor(b0)
+  const rHi = Math.min(255, r + 34)
+  const gHi = Math.min(255, g + 38)
+  const bHi = Math.min(255, b + 20)
+  const pat = variant % 4
+  const plot = (dx: number, dy: number, hi: boolean) => {
+    const x = xi + dx
+    const y = yi + dy
+    if (x < 0 || x >= cw || y < 0 || y >= ch) return
+    ctx.fillStyle = hi ? `rgb(${rHi},${gHi},${bHi})` : `rgb(${r},${g},${b})`
+    ctx.fillRect(x, y, 1, 1)
+  }
+  if (pat === 0) {
+    const pts: [number, number][] = [
+      [1, 0],
+      [2, 0],
+      [0, 1],
+      [1, 1],
+      [2, 1],
+      [3, 1],
+      [1, 2],
+      [2, 2],
+      [2, 3],
+    ]
+    for (let i = 0; i < pts.length; i++) {
+      const [dx, dy] = pts[i]!
+      plot(dx, dy, i % 3 === 1)
+    }
+  } else if (pat === 1) {
+    for (let dx = 0; dx < 4; dx++) plot(dx, 2, dx === 1 || dx === 2)
+    plot(1, 1, true)
+    plot(2, 1, true)
+    plot(0, 3, false)
+    plot(3, 3, false)
+    plot(1, 3, false)
+    plot(2, 3, false)
+  } else if (pat === 2) {
+    plot(2, 0, true)
+    plot(1, 1, false)
+    plot(2, 1, true)
+    plot(3, 1, false)
+    plot(0, 2, false)
+    plot(1, 2, true)
+    plot(2, 2, true)
+    plot(3, 2, false)
+    plot(1, 3, false)
+    plot(2, 3, true)
+  } else {
+    for (let dy = 0; dy < 4; dy++) {
+      for (let dx = 0; dx < 4; dx++) {
+        const d = Math.abs(dx - 1.5) + Math.abs(dy - 1.5)
+        if (d < 2.4) plot(dx, dy, d < 1.2)
+      }
+    }
+  }
+}
+
+// ---------- 玩家脚底椭圆阴影（小离屏纹理） ----------
+
 let shadowTexCache: HTMLCanvasElement | null = null
 function getShadowTexture(): HTMLCanvasElement {
   if (shadowTexCache) return shadowTexCache
@@ -206,6 +572,8 @@ function getShadowTexture(): HTMLCanvasElement {
   shadowTexCache = c
   return c
 }
+
+// ---------- 地形像素着色辅助（逐像素 raycast 用） ----------
 
 /** 黑白马赛克：图集未加载时的兜底 */
 function mosaicRgb(tileIx: number, tileIz: number): [number, number, number] {
@@ -274,6 +642,8 @@ function sampleBlobTerrainRgbResolved(
 }
 
 const TERRAIN_SY_START = HORIZON + TERRAIN_MIN_ROW
+
+// ---------- 投影：透视（游玩）与正交俯视（编辑） ----------
 
 /** 编辑模式：正交俯视，世界单位 → 屏幕像素；数值越小视野越大（同屏显示更多格） */
 const TOPDOWN_PX_PER_WORLD = 1.72 / 2
@@ -445,6 +815,7 @@ function shouldPlaceSnowTreeOnTile(
   return localPatch < pPatch
 }
 
+/** 树脚底落在地块内随机偏移（同一格可区分多棵树） */
 function snowTreeFeetWorld(tix: number, tiz: number): { wx: number; wz: number } {
   const h1 = treeCellHash(tix, tiz, TREE_HASH_BASE + 11)
   const h2 = treeCellHash(tix, tiz, TREE_HASH_BASE + 22)
@@ -589,7 +960,55 @@ function worldPosBlockedByCityFence(
   return false
 }
 
+function mulberry32Hut(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), a | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/**
+ * 在世界原点邻域随机抽样可走平地格，摆少量兽人小屋；互斥最小间距、排除小镇脚印与栏碰撞。
+ */
+function buildMonsterHutSites(
+  bw: BlobWorld,
+  seedNonce: number,
+  layout: readonly CityPropDef[],
+  cg: CityGenParams,
+  placeX: number,
+  placeZ: number,
+  ewTw: CityFenceEwLayoutTweak,
+  ewClampZ: { min: number; max: number },
+): { wx: number; wz: number }[] {
+  const rand = mulberry32Hut((seedNonce >>> 0) ^ 0x48757421 ^ Math.imul(cg.seed >>> 0, 2654435761))
+  const sites: { wx: number; wz: number }[] = []
+  const minD2 = MONSTER_HUT_MIN_SEP_WORLD * MONSTER_HUT_MIN_SEP_WORLD
+  const townPad = 56
+  let attempts = 0
+  const span = 112
+  while (sites.length < MONSTER_HUT_COUNT && attempts < 14000) {
+    attempts++
+    const tix = Math.floor(rand() * (span * 2 + 1)) - span
+    const tiz = Math.floor(rand() * (span * 2 + 1)) - span
+    if (!isBlobTileWalkable(bw, tix, tiz)) continue
+    const wx = (tix + 0.5) * TILE_WORLD
+    const wz = (tiz + 0.5) * TILE_WORLD
+    if (isInsidePlacedTownFootprint(wx, wz, cg, placeX, placeZ, townPad)) continue
+    if (worldPosBlockedByCityFence(wx, wz, layout, cg.ewFenceZCenter, ewTw, ewClampZ)) continue
+    if (sites.some((s) => (s.wx - wx) ** 2 + (s.wz - wz) ** 2 < minD2)) continue
+    sites.push({ wx, wz })
+  }
+  return sites
+}
+
+/** 深度排序用绘制项：`key` 越大越靠近相机（越后画） */
 type DepthSprite = { key: number; draw: () => void }
+
+// ---------- 透视贴图：三角形仿射、东西栏、小镇道具、树、野怪、兽人小屋 ----------
 
 /** 纹理三角形仿射映射到屏幕三角形（Canvas2D 真透视四边形的一半） */
 function drawTexturedTriangleAffine(
@@ -905,6 +1324,63 @@ function drawSnowTreeTopdownOne(
   ctx.restore()
 }
 
+function drawMonsterHutPerspectiveOne(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  wx: number,
+  wz: number,
+  feetDownSrcPx: number,
+  camX: number,
+  camZ: number,
+) {
+  const refRow = (FOCAL * CAM_HEIGHT) / MONSTER_HUT_REF_DZ
+  const iw = img.naturalWidth || 1
+  const ih = img.naturalHeight || 1
+  const feet = worldToScreen(wx, wz, camX, camZ)
+  if (!feet) return
+  const dz = camZ - wz
+  if (dz <= 0) return
+  const row = (FOCAL * CAM_HEIGHT) / dz
+  const syDisp = feet.sy - CROP_TOP
+  if (syDisp < -130 || syDisp > DISPLAY_H + 130) return
+  if (feet.sx < -130 || feet.sx > W + 130) return
+  const sc = Math.max(0.22, Math.min(1.22, row / refRow)) * MONSTER_HUT_DISPLAY_SCALE
+  const dw = iw * sc
+  const dh = ih * sc
+  const yOff = feetDownSrcPx * sc
+  ctx.save()
+  ctx.imageSmoothingEnabled = false
+  ctx.drawImage(img, feet.sx - dw * 0.5, syDisp - dh + yOff, dw, dh)
+  ctx.restore()
+}
+
+function drawMonsterHutTopdownOne(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  wx: number,
+  wz: number,
+  feetDownSrcPx: number,
+  camX: number,
+  camZ: number,
+) {
+  const k = TOPDOWN_PX_PER_WORLD
+  const iw = img.naturalWidth || 1
+  const ih = img.naturalHeight || 1
+  const refTilePx = TILE_WORLD * k
+  const sc = Math.max(0.18, Math.min(0.88, (refTilePx * 1.42) / ih)) * MONSTER_HUT_DISPLAY_SCALE
+  const feet = worldToScreenTopdown(wx, wz, camX, camZ)
+  const syDisp = feet.sy - CROP_TOP
+  if (syDisp < -130 || syDisp > DISPLAY_H + 130) return
+  if (feet.sx < -130 || feet.sx > W + 130) return
+  const dw = iw * sc
+  const dh = ih * sc
+  const yOff = feetDownSrcPx * sc
+  ctx.save()
+  ctx.imageSmoothingEnabled = false
+  ctx.drawImage(img, feet.sx - dw * 0.5, syDisp - dh + yOff, dw, dh)
+  ctx.restore()
+}
+
 function monsterDepthKeyPerspective(m: MonsterInst, camX: number, camZ: number): number | null {
   const feet = worldToScreen(m.wx, m.wz, camX, camZ)
   if (!feet) return null
@@ -959,7 +1435,10 @@ function drawMonsterPerspectiveOne(
 const TREE_FEET_DOWN_MIN = -24
 const TREE_FEET_DOWN_MAX = 40
 
-/** 全屏压暗 + 径向暗角；dimPct / vignettePct 为 0–100 */
+/**
+ * 全屏后处理：先可选半透明黑层压暗，再叠径向渐变暗角（中心透明、边缘变暗）。
+ * `dimPct` / `vignettePct` 为 0–100，来自 UI 滑条 ref。
+ */
 function drawScenePostFx(
   ctx: CanvasRenderingContext2D,
   cw: number,
@@ -996,26 +1475,39 @@ function drawScenePostFx(
   ctx.restore()
 }
 
-function createFallSnowFlakes(): FallFlake[] {
+function createFallSnowFlakes(camX: number, camZ: number): FallFlake[] {
   const flakes: FallFlake[] = []
   for (let i = 0; i < FALL_SNOW_COUNT; i++) {
     const roll = Math.random()
     const layer: FallLayer = roll < 0.48 ? 0 : roll < 0.82 ? 1 : 2
-    const slow = layer === 0
-    const mid = layer === 1
-    flakes.push({
-      x: Math.random() * W,
-      y: Math.random() * (DISPLAY_H + 100) - 50,
-      vx: 8 + (slow ? 3 : mid ? 12 : 20) + Math.random() * 14,
-      vy: (slow ? 18 : mid ? 42 : 72) + Math.random() * 38,
-      wobble: Math.random() * Math.PI * 2,
-      layer,
-      variant: Math.floor(Math.random() * 16),
-    })
+    flakes.push(respawnFallFlake(camX, camZ, layer, 'snow'))
   }
   return flakes
 }
 
+function createFallPetals(camX: number, camZ: number): FallFlake[] {
+  const flakes: FallFlake[] = []
+  for (let i = 0; i < FALL_SNOW_COUNT; i++) {
+    const roll = Math.random()
+    const layer: FallLayer = roll < 0.48 ? 0 : roll < 0.82 ? 1 : 2
+    flakes.push(respawnFallFlake(camX, camZ, layer, 'petal'))
+  }
+  return flakes
+}
+
+function createFallLeaves(camX: number, camZ: number): FallFlake[] {
+  const flakes: FallFlake[] = []
+  for (let i = 0; i < FALL_SNOW_COUNT; i++) {
+    const roll = Math.random()
+    const layer: FallLayer = roll < 0.48 ? 0 : roll < 0.82 ? 1 : 2
+    flakes.push(respawnFallFlake(camX, camZ, layer, 'leaf'))
+  }
+  return flakes
+}
+
+/**
+ * 无限地图 UI + Canvas：所有交互状态在此声明，耗时逻辑在 `gameLoop`（`ready` 后每帧）。
+ */
 export default function InfiniteMapScene() {
   const { t } = useLanguage()
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -1038,6 +1530,7 @@ export default function InfiniteMapScene() {
   const [musicOn, setMusicOn] = useState(true)
   const [showTerrainLabels, setShowTerrainLabels] = useState(false)
   const [editMode, setEditMode] = useState(false)
+  const [terrainTextureSet, setTerrainTextureSet] = useState<InfiniteMapTerrainTextureSetId>('blob')
   const [terrainSeaPct, setTerrainSeaPct] = useState(25)
   const [terrainMtnPct, setTerrainMtnPct] = useState(56)
   const [fxDimPct, setFxDimPct] = useState(12)
@@ -1061,7 +1554,13 @@ export default function InfiniteMapScene() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const gameWrapRef = useRef<HTMLDivElement>(null)
   const fallSnowRef = useRef<FallFlake[] | null>(null)
+  /** 与 `fallSnowRef` 中粒子对应的地形套，切换贴图集时重建粒子 */
+  const fallParticlesTerrainRef = useRef<InfiniteMapTerrainTextureSetId | null>(null)
   const treeSnowImgRef = useRef<HTMLImageElement | null>(null)
+  const treeGrassImgRef = useRef<HTMLImageElement | null>(null)
+  const monsterHutImgRef = useRef<HTMLImageElement | null>(null)
+  const monsterHutSitesRef = useRef<{ wx: number; wz: number }[]>([])
+  const terrainTextureSetRef = useRef<InfiniteMapTerrainTextureSetId>('blob')
   const cityImgsRef = useRef<Map<string, HTMLImageElement>>(new Map())
   const cityGenRef = useRef<CityGenParams>({ ...CITY_GEN_DEFAULTS })
   const cityLayoutRef = useRef<CityPropDef[]>(buildCityPropLayout(CITY_GEN_DEFAULTS))
@@ -1071,6 +1570,8 @@ export default function InfiniteMapScene() {
   })
   const [cityGen, setCityGen] = useState<CityGenParams>(() => ({ ...CITY_GEN_DEFAULTS }))
   const [townPlaceNonce, setTownPlaceNonce] = useState(0)
+  /** 与随机地图联动，刷新兽人小屋世界坐标 */
+  const [hutSitesNonce, setHutSitesNonce] = useState(0)
   const fenceEwLayoutRef = useRef<CityFenceEwLayoutTweak>({ ...FENCE_EW_LAYOUT_FIXED })
   const [displayScale, setDisplayScale] = useState(1)
 
@@ -1096,6 +1597,27 @@ export default function InfiniteMapScene() {
     townPlaceRef.current = place
     cityLayoutRef.current = offsetCityPropLayout(local, place.placeX, place.placeZ, cityGen.ewFenceZCenter)
   }, [cityGen, ready, terrainSeaPct, terrainMtnPct, townPlaceNonce])
+
+  useLayoutEffect(() => {
+    const bw = blobWorldRef.current
+    if (!bw || !ready) return
+    const cg = cityGenRef.current
+    const tp = townPlaceRef.current
+    const ewZ = cg.ewFenceZCenter
+    const dzPlace = tp.placeZ - ewZ
+    const extZ = ewFenceExtentZ(cg)
+    const ewClamp = { min: extZ.zSouth + dzPlace, max: extZ.zNorth + dzPlace }
+    monsterHutSitesRef.current = buildMonsterHutSites(
+      bw,
+      hutSitesNonce,
+      cityLayoutRef.current,
+      cg,
+      tp.placeX,
+      tp.placeZ,
+      fenceEwLayoutRef.current,
+      ewClamp,
+    )
+  }, [ready, hutSitesNonce, townPlaceNonce, cityGen, terrainSeaPct, terrainMtnPct])
 
   useLayoutEffect(() => {
     const el = gameWrapRef.current
@@ -1142,6 +1664,10 @@ export default function InfiniteMapScene() {
   useEffect(() => {
     editModeRef.current = editMode
   }, [editMode])
+
+  useEffect(() => {
+    terrainTextureSetRef.current = terrainTextureSet
+  }, [terrainTextureSet])
 
   useEffect(() => {
     monsterCountRef.current = monsterCount
@@ -1226,6 +1752,7 @@ export default function InfiniteMapScene() {
     }
     rebuildMonsterSwarm()
     setTownPlaceNonce((n) => n + 1)
+    setHutSitesNonce((n) => n + 1)
   }, [terrainSeaPct, terrainMtnPct, rebuildMonsterSwarm])
 
   useEffect(() => {
@@ -1240,6 +1767,28 @@ export default function InfiniteMapScene() {
   }, [])
 
   useEffect(() => {
+    const img = new Image()
+    img.onload = () => {
+      treeGrassImgRef.current = img
+    }
+    img.src = TREE_GRASS_URL
+    return () => {
+      if (treeGrassImgRef.current === img) treeGrassImgRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const img = new Image()
+    img.onload = () => {
+      monsterHutImgRef.current = img
+    }
+    img.src = MONSTER_HUT_URL
+    return () => {
+      if (monsterHutImgRef.current === img) monsterHutImgRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
     const cancel = loadCityPropImages((m) => {
       cityImgsRef.current = m
     })
@@ -1249,10 +1798,11 @@ export default function InfiniteMapScene() {
     }
   }, [])
 
-  /** Blob 图集 3×24（与 map.html 同源） */
+  /** Blob 图集 3×24：按所选地形套加载 URL（分区/blob 逻辑不变，仅贴图源切换） */
   useEffect(() => {
     let cancelled = false
-    blobWaterFramesRef.current = BLOB_WATER_ANIM_FRAMES.map(() => null)
+    const urls = terrainTextureUrls(terrainTextureSet)
+    blobWaterFramesRef.current = urls.water.map(() => null)
 
     const loadTo = (url: string, onOk: (a: BlobAtlas) => void) => {
       const img = new Image()
@@ -1264,20 +1814,25 @@ export default function InfiniteMapScene() {
       img.src = url
     }
 
-    loadTo(BLOB_FRAME_MTN, (a) => {
+    blobAtlasMtnRef.current = null
+    blobAtlasNormRef.current = null
+    blobAtlasNormX1Ref.current = null
+    blobAtlasNormX2Ref.current = null
+
+    loadTo(urls.mtn, (a) => {
       blobAtlasMtnRef.current = a
     })
-    loadTo(BLOB_FRAME_NORM, (a) => {
+    loadTo(urls.norm, (a) => {
       blobAtlasNormRef.current = a
     })
-    loadTo(BLOB_FRAME_NORM_X1, (a) => {
+    loadTo(urls.normX1, (a) => {
       blobAtlasNormX1Ref.current = a
     })
-    loadTo(BLOB_FRAME_NORM_X2, (a) => {
+    loadTo(urls.normX2, (a) => {
       blobAtlasNormX2Ref.current = a
     })
 
-    BLOB_WATER_ANIM_FRAMES.forEach((url, idx) => {
+    urls.water.forEach((url, idx) => {
       loadTo(url, (a) => {
         const next = blobWaterFramesRef.current.slice()
         next[idx] = a
@@ -1291,9 +1846,9 @@ export default function InfiniteMapScene() {
       blobAtlasNormRef.current = null
       blobAtlasNormX1Ref.current = null
       blobAtlasNormX2Ref.current = null
-      blobWaterFramesRef.current = BLOB_WATER_ANIM_FRAMES.map(() => null)
+      blobWaterFramesRef.current = urls.water.map(() => null)
     }
-  }, [])
+  }, [terrainTextureSet])
 
   /** 仅加载默认精灵表 map/TINA.png（与 topdown 同款切帧布局） */
   useEffect(() => {
@@ -1334,6 +1889,10 @@ export default function InfiniteMapScene() {
     }
   }, [])
 
+  /**
+   * 主循环：输入 → 地形光栅 → 深度批处理 → 粒子 → 后效 → 动画计数。
+   * 依赖数组仅 `[ready]`：其余一律读 ref，避免每改一个滑条就重建 RAF。
+   */
   const gameLoop = useCallback(
     (now?: number) => {
       rafRef.current = requestAnimationFrame(gameLoop)
@@ -1563,7 +2122,9 @@ export default function InfiniteMapScene() {
         }
       }
 
-      const treeImg = treeSnowImgRef.current
+      const texSet = terrainTextureSetRef.current
+      const treeImg =
+        texSet === 'blob' ? treeSnowImgRef.current : treeGrassImgRef.current
       const treePlaces: { wx: number; wz: number }[] = []
       if (treeImg && treeImg.complete && treeImg.naturalWidth > 0 && bw) {
         let vbTrees = edit ? visibleGroundTileBoundsTopdown(topCx, topCz) : visibleGroundTileBounds(camX, camZ)
@@ -1598,6 +2159,29 @@ export default function InfiniteMapScene() {
             depthBatch.push({
               key: k,
               draw: () => drawSnowTreePerspectiveOne(ctx, treeImg, tr.wx, tr.wz, fd, camX, camZ),
+            })
+          }
+        }
+      }
+
+      const hutImg = monsterHutImgRef.current
+      const hutSites = monsterHutSitesRef.current
+      if (hutImg?.complete && hutImg.naturalWidth > 0 && hutSites.length > 0) {
+        const fdh = MONSTER_HUT_FEET_DOWN_SRC_PX
+        for (let hi = 0; hi < hutSites.length; hi++) {
+          const hut = hutSites[hi]!
+          const tie = hi * 1e-5
+          if (edit) {
+            depthBatch.push({
+              key: treeDepthKeyTopdown(hut.wx, hut.wz, topCx, topCz) + tie,
+              draw: () => drawMonsterHutTopdownOne(ctx, hutImg, hut.wx, hut.wz, fdh, topCx, topCz),
+            })
+          } else {
+            const k = treeDepthKeyPerspective(hut.wx, hut.wz, camX, camZ)
+            if (k === null) continue
+            depthBatch.push({
+              key: k + tie,
+              draw: () => drawMonsterHutPerspectiveOne(ctx, hutImg, hut.wx, hut.wz, fdh, camX, camZ),
             })
           }
         }
@@ -1679,21 +2263,23 @@ export default function InfiniteMapScene() {
 
       let flakes = fallSnowRef.current
       if (!edit) {
-        if (!flakes || flakes.length !== FALL_SNOW_COUNT) {
-          flakes = createFallSnowFlakes()
+        const particleKind = fallParticleKindForTerrain(texSet)
+        if (
+          !flakes ||
+          flakes.length !== FALL_SNOW_COUNT ||
+          fallParticlesTerrainRef.current !== texSet
+        ) {
+          flakes =
+            particleKind === 'snow'
+              ? createFallSnowFlakes(camX, camZ)
+              : particleKind === 'petal'
+                ? createFallPetals(camX, camZ)
+                : createFallLeaves(camX, camZ)
           fallSnowRef.current = flakes
+          fallParticlesTerrainRef.current = texSet
         }
-        const tw = t0 * 0.0018
-        for (const f of flakes) {
-          f.y += f.vy * dt
-          f.x += f.vx * dt + Math.sin(tw + f.wobble) * (f.layer === 0 ? 10 : f.layer === 1 ? 6 : 4) * dt
-          const margin = f.layer === 2 ? 6 : f.layer === 1 ? 3 : 2
-          if (f.y > DISPLAY_H + margin) {
-            f.y = -margin - Math.random() * 60
-            f.x = Math.random() * W
-          }
-          if (f.x > W + margin) f.x = -margin
-          if (f.x < -margin) f.x = W + 2
+        for (let i = 0; i < flakes.length; i++) {
+          flakes[i] = updateFallFlake(flakes[i]!, camX, camZ, dt, t0, particleKind)
         }
         ctx.save()
         ctx.imageSmoothingEnabled = false
@@ -1701,12 +2287,27 @@ export default function InfiniteMapScene() {
         ctx.rect(0, 0, W, DISPLAY_H)
         ctx.clip()
         for (const f of flakes) {
-          const xi = Math.floor(f.x)
-          const yi = Math.floor(f.y)
-          const rgb = rgbForSnowFlake(f.layer, f.wobble)
-          if (f.layer === 0) drawSnowFar(ctx, xi, yi, rgb)
-          else if (f.layer === 1) drawSnowMid(ctx, xi, yi, rgb)
-          else drawSnowNear(ctx, xi, yi, rgb, f.variant, W, DISPLAY_H)
+          const scr = worldToScreen(f.wx, f.wz, camX, camZ)
+          if (!scr || scr.sy < HORIZON - 6) continue
+          const xi = Math.floor(scr.sx)
+          const yi = Math.floor(scr.sy - CROP_TOP + f.pixelFallY)
+          if (yi < -8 || yi > DISPLAY_H + 8 || xi < -8 || xi > W + 8) continue
+          if (particleKind === 'petal') {
+            const rgb = rgbForPetalFlake(f.layer, f.wobble)
+            if (f.layer === 0) drawPetalFar(ctx, xi, yi, rgb)
+            else if (f.layer === 1) drawPetalMid(ctx, xi, yi, rgb)
+            else drawPetalNear(ctx, xi, yi, rgb, f.variant, W, DISPLAY_H)
+          } else if (particleKind === 'leaf') {
+            const rgb = rgbForLeafFlake(f.layer, f.wobble)
+            if (f.layer === 0) drawLeafFar(ctx, xi, yi, rgb)
+            else if (f.layer === 1) drawLeafMid(ctx, xi, yi, rgb)
+            else drawLeafNear(ctx, xi, yi, rgb, f.variant, W, DISPLAY_H)
+          } else {
+            const rgb = rgbForSnowFlake(f.layer, f.wobble)
+            if (f.layer === 0) drawSnowFar(ctx, xi, yi, rgb)
+            else if (f.layer === 1) drawSnowMid(ctx, xi, yi, rgb)
+            else drawSnowNear(ctx, xi, yi, rgb, f.variant, W, DISPLAY_H)
+          }
         }
         ctx.restore()
       }
@@ -1795,6 +2396,22 @@ export default function InfiniteMapScene() {
         <Button type="default" size="small" onClick={() => setTownPlaceNonce((n) => n + 1)}>
           {t('infiniteMapRandomTownPlace')}
         </Button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+            {t('infiniteMapTerrainTextureSet')}
+          </Text>
+          <Select<InfiniteMapTerrainTextureSetId>
+            size="small"
+            style={{ minWidth: 168 }}
+            value={terrainTextureSet}
+            onChange={setTerrainTextureSet}
+            options={[
+              { value: 'blob', label: t('infiniteMapTerrainTextureBlob') },
+              { value: 'tileg', label: t('infiniteMapTerrainTextureTileg') },
+              { value: 'tiler', label: t('infiniteMapTerrainTextureTiler') },
+            ]}
+          />
+        </div>
       </div>
       <div
         style={{

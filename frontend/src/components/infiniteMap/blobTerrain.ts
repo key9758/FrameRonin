@@ -1,8 +1,26 @@
 /**
- * RoninTileMap blob 地形（与 public/map/blob/map.html 同源）。
- * 世界整数格 (tx, ty) ≡ map.html 的 (wx, wy)；北邻为 ty - 1。
+ * @fileoverview RoninTileMap「Blob」程序化地形核心。
+ *
+ * ## 与 map.html 的关系
+ * 逻辑与 `public/map/blob/map.html` 一致：同一套 Perlin/FBM 噪声、海平面与山地阈值、
+ * 河谷走廊判水、以及 8 邻域掩码 → 图集子块索引（`MASK_TO_INDEX`）。
+ *
+ * ## 坐标系
+ * - **世界整数格** `(tx, ty)`：与 map.html 的 `(wx, wy)` 同义；**北**为 `ty - 1`（上邻）。
+ * - **BlobWorld** 按 **32×32 世界格** 分块缓存（`BLOB_CHUNK_SIZE`），按需生成、LRU 式淘汰。
+ *
+ * ## 数据流（简）
+ * 1. `BlobWorld.landWorld` / `biomeWorld`：某格是否水、平地(IMG_NORM)或山(IMG_MTN)。
+ * 2. `getMaskWater` / `getMaskLandBiome`：八邻同类 → 0–255 掩码。
+ * 3. `nearestBlobTileIndex`：掩码 → `frame_004`/`007` 等图集中 **sheet 下标**（0-based）。
+ * 4. `sampleBlobAtlas`：世界坐标在地块内 UV → 像素 RGB（供 Canvas 光栅化）。
+ *
+ * ## 可走与装饰
+ * - `isBlobTileWalkable`：仅 **平地**（非水非山），角色/小镇锚点用。
+ * - `isBlobTileLandNotWater`：含山地，树木等「陆上」装饰用。
  */
 
+/** 从 PNG 解码后的图集：RGBA 交错、`cellW×cellH` 为单个子块尺寸（3 列 × 24 行布局） */
 export type BlobAtlas = {
   data: Uint8ClampedArray
   stride: number
@@ -12,13 +30,20 @@ export type BlobAtlas = {
 
 export const BLOB_TILE_COLS = 3
 export const BLOB_TILE_ROWS = 24
+/** 一块 Chunk 覆盖的世界格边长；与缓存键 `(cx,cy)` 对应 */
 export const BLOB_CHUNK_SIZE = 32
+/** 内存中最多保留的 Chunk 数；超出则从最早入队者淘汰 */
 const MAX_CACHED_CHUNKS = 128
 
+/** `biomeWorld` 取值：山地 → 采样 frame_001 类图集 */
 const IMG_MTN = 0
+/** 平地 → 采样 frame_004（及 X1/X2 变种） */
 const IMG_NORM = 1
 
-/** 与 map.html / frame_000 一致；001 / 004 / 007 共用布局 */
+/**
+ * 八邻掩码（0–255）→ 图集 **sheet 下标**。
+ * 与 map.html / `frame_000` 示意一致；`001` / `004` / `007` 等共用同一邻接编码。
+ */
 const MASK_TO_INDEX: Record<number, number> = {
   0: 13,
   208: 0,
@@ -73,6 +98,9 @@ const FORBIDDEN_TILE_INDEX = 71
 const FALLBACK_TILE_INDEX = 4
 const MASK_KEYS = Object.keys(MASK_TO_INDEX).map((k) => Number(k))
 
+// ---------- 噪声与工具（内部） ----------
+
+/** FNV-1a 风格：任意字符串 → 32 位种子，供 Perlin 初始化 */
 function stringSeedToUint32(s: string): number {
   let h = 2166136261
   for (let i = 0; i < s.length; i++) {
@@ -82,6 +110,7 @@ function stringSeedToUint32(s: string): number {
   return h >>> 0
 }
 
+/** Mulberry32：小体积、可复现的 [0,1) 均匀 PRNG */
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0
   return () => {
@@ -165,6 +194,7 @@ function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v))
 }
 
+/** 8 位中 1 的个数；用于掩码汉明距离 */
 function pop8(n: number): number {
   n &= 255
   let c = 0
@@ -175,6 +205,10 @@ function pop8(n: number): number {
   return c
 }
 
+/**
+ * 将 8 邻域掩码映射到合法图集下标；无精确匹配时取汉明距离最小的键。
+ * @param mask `computeBlobMask` 返回值（已 `& 255`）
+ */
 export function nearestBlobTileIndex(mask: number): number {
   mask &= 255
   const direct = MASK_TO_INDEX[mask]
@@ -222,11 +256,19 @@ export function computeBlobMask(tx: number, ty: number, pred: (x: number, y: num
   return mask
 }
 
-type ChunkData = { land: Uint8Array; biome: Uint8Array }
+type ChunkData = {
+  /** 1=陆 0=水（海/湖/河） */
+  land: Uint8Array
+  /** 陆上：IMG_MTN / IMG_NORM */
+  biome: Uint8Array
+}
 
 /**
- * 宏观地形（世界格 wx,wy）：低频陆高 → 连片湖/陆；低频山场 → 成片山域；河谷噪声 → 低洼处曲带状河。
- * 海平面 / 山地阈值仍由 UI 滑条控制。
+ * 宏观地形参数（世界连续坐标 wx,wy 输入 FBM）：
+ * - **陆高**：大尺度 → 连片湖/陆；`seaLevel` 截断为水。
+ * - **山场**：较慢噪声 → 成片山地；`mtnTh` 与平地分界。
+ * - **河谷**：窄走廊 + 高度带 → 曲流河（仍为「格级」水）。
+ * 海平面 / 山地阈值由 `BlobWorld.setParams`（UI 滑条）实时调整。
  */
 const LAND_SCALE = 26
 const LAND_OCTAVES = 3
@@ -237,14 +279,24 @@ const RIVER_OCTAVES = 2
 const RIVER_ABS_THRESH = 0.1
 const RIVER_HEIGHT_BAND = 0.16
 
+/**
+ * 无限延伸的程序化地形：按 Chunk 懒生成并缓存。
+ * - 换种子：`reseed` 会重建三套 Perlin 场并 `clearCache`。
+ * - 换参数：仅 `seaLevel`/`mtnTh` 变化时也应 `clearCache`（由调用方负责），否则旧 Chunk 与新区划不一致。
+ */
 export class BlobWorld {
   private readonly chunkCache = new Map<string, ChunkData>()
   private readonly chunkQueue: string[] = []
+  /** 陆高噪声（归一化后截水） */
   private nHeight: (x: number, y: number) => number
+  /** 山地权重噪声 */
   private nS4: (x: number, y: number) => number
+  /** 河谷走廊噪声 */
   private nRiver: (x: number, y: number) => number
 
+  /** 0–1：低于此高度的陆格视为水（湖/海） */
   seaLevel = 0.42
+  /** 0–1：陆上高于此噪声值视为山地 */
   mtnTh = 0.48
 
   constructor(seedStr: string) {
@@ -254,16 +306,19 @@ export class BlobWorld {
     this.nRiver = createPerlin2D(base ^ 0x927b51c1)
   }
 
+  /** 清空所有 Chunk；地形参数或种子变更后须调用 */
   clearCache(): void {
     this.chunkCache.clear()
     this.chunkQueue.length = 0
   }
 
+  /** 更新海平面与山地阈值（不自动清缓存；InfiniteMapScene 中与 clearCache 配对使用） */
   setParams(seaLevel: number, mtnTh: number): void {
     this.seaLevel = seaLevel
     this.mtnTh = mtnTh
   }
 
+  /** 生成单块 Chunk：`(cx,cy)` 为 Chunk 索引，内含 `BLOB_CHUNK_SIZE²` 个世界格 */
   private buildChunk(cx: number, cy: number): ChunkData {
     const land = new Uint8Array(BLOB_CHUNK_SIZE * BLOB_CHUNK_SIZE)
     const biome = new Uint8Array(BLOB_CHUNK_SIZE * BLOB_CHUNK_SIZE)
@@ -306,6 +361,7 @@ export class BlobWorld {
     return { land, biome }
   }
 
+  /** 取或创建 Chunk，并维护 FIFO 淘汰队列 */
   ensureChunk(cx: number, cy: number): ChunkData {
     const key = `${cx},${cy}`
     let ch = this.chunkCache.get(key)
@@ -320,6 +376,7 @@ export class BlobWorld {
     return ch
   }
 
+  /** @returns 1 陆 / 0 水 */
   landWorld(wx: number, wy: number): number {
     const cx = Math.floor(wx / BLOB_CHUNK_SIZE)
     const cy = Math.floor(wy / BLOB_CHUNK_SIZE)
@@ -329,6 +386,7 @@ export class BlobWorld {
     return ch.land[ly * BLOB_CHUNK_SIZE + lx]!
   }
 
+  /** 仅当 `landWorld===1` 有意义：`IMG_MTN` 或 `IMG_NORM` */
   biomeWorld(wx: number, wy: number): number {
     const cx = Math.floor(wx / BLOB_CHUNK_SIZE)
     const cy = Math.floor(wy / BLOB_CHUNK_SIZE)
@@ -381,6 +439,10 @@ export class BlobWorld {
     return computeBlobMask(tx, ty, (nx, ny) => this.landWorld(nx, ny) === 1 && this.biomeWorld(nx, ny) === b)
   }
 
+  /**
+   * 单格最终贴图类型 + 图集下标（渲染前再结合 `nearestBlobTileIndex` 的掩码逻辑）。
+   * `(tx,ty)` 即世界格，与场景里 `tix/tiz` 一致。
+   */
   sampleTileIndex(tx: number, ty: number): { kind: 'water' | 'mtn' | 'norm'; sheetIndex: number } {
     if (this.landWorld(tx, ty) === 0) {
       return { kind: 'water', sheetIndex: nearestBlobTileIndex(this.getMaskWater(tx, ty)) }
@@ -436,6 +498,10 @@ export function findWalkableTileCenter(
   return null
 }
 
+/**
+ * 将整张 `frame_001.png` 类图读入为 `BlobAtlas`（不切 Canvas，保留 ImageData）。
+ * 子块尺寸 = 图宽/3 × 图高/24。
+ */
 export function decodeBlobAtlasFromImage(img: HTMLImageElement): BlobAtlas | null {
   const iw = img.naturalWidth
   const ih = img.naturalHeight
@@ -464,6 +530,10 @@ function worldFracInTile(world: number, tileWorld: number): number {
 }
 
 /** 与 map.html / Canvas 图集一致：ImageData 行 0 在上方，不对 wz 做垂直翻转 */
+/**
+ * 在世界位置 `(wx,wz)` 处，从指定 sheet 子块取 RGB（最近邻）。
+ * `wz` 方向与 Canvas 图像 v 轴一致（不翻转），与 map.html 约定相同。
+ */
 export function sampleBlobAtlas(
   atlas: BlobAtlas,
   sheetIndex: number,
@@ -482,6 +552,7 @@ export function sampleBlobAtlas(
   return [data[i]!, data[i + 1]!, data[i + 2]!]
 }
 
+/** 调试用短标签：水/山/平 + 掩码对应下标 */
 export function describeBlobTerrain(world: BlobWorld, tx: number, ty: number): string {
   if (world.landWorld(tx, ty) === 0) {
     const idx = nearestBlobTileIndex(world.getMaskWater(tx, ty))

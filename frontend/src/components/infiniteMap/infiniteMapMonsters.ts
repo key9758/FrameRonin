@@ -1,9 +1,26 @@
+/**
+ * @fileoverview 无限地图野怪：贴图加载、群体生成与简单游荡 AI。
+ *
+ * ## 资源
+ * `map/monster/*.png` 列表由 Vite 插件 `virtual:infinite-map-monster-files` 注入为 `MONSTER_PUBLIC_FILENAMES`，
+ * 避免手写文件名列表与目录不同步。
+ *
+ * ## 精灵布局
+ * 每张图 **4 列 × 8 行**：列 = 走路帧循环；行 = **八方向**（与 `velocityToMonsterRow` 一致）。
+ *
+ * ## 运动
+ * - 八方向匀速；定时 `repathIn` 到期后随机换新方向。
+ * - 撞水或出陆地时速度取反并缩短下次转向间隔。
+ */
 import { isBlobTileLandNotWater, type BlobWorld } from './blobTerrain'
 import { MONSTER_PUBLIC_FILENAMES } from 'virtual:infinite-map-monster-files'
 
+/** 单张怪物表横向帧数（走路循环） */
 export const MONSTER_COLS = 4
+/** 单张怪物表纵向行数（8 向） */
 export const MONSTER_ROWS = 8
 
+/** 单只野怪实例状态（世界坐标 + 动画） */
 export type MonsterInst = {
   wx: number
   wz: number
@@ -76,6 +93,10 @@ function monsterUrls(): string[] {
   return [...MONSTER_PUBLIC_FILENAMES].map((n) => base + n)
 }
 
+/**
+ * 并行加载全部怪物 PNG；完成时回调「有效图片」数组（加载失败槽位被 filter 掉）。
+ * @returns 取消函数：卸载 onload、清空 src，避免泄漏。
+ */
 export function loadMonsterImages(onDone: (imgs: HTMLImageElement[]) => void): () => void {
   let cancelled = false
   const urls = monsterUrls()
@@ -150,6 +171,9 @@ export function createMonsterSwarm(
   return out
 }
 
+/**
+ * 积分位置、更新走路帧、定时换向；陆地碰撞时反弹。
+ */
 export function stepMonster(
   m: MonsterInst,
   world: BlobWorld,

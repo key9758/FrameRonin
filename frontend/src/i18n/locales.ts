@@ -74,6 +74,10 @@ export const locales: Record<Lang, Record<string, string>> = {
     infiniteMapMonsterCount: '野怪数量',
     infiniteMapRandomMap: '随机生成地图',
     infiniteMapRandomTownPlace: '随机小镇位置（平地雪地）',
+    infiniteMapTerrainTextureSet: '地形贴图集',
+    infiniteMapTerrainTextureBlob: '默认（map/blob）',
+    infiniteMapTerrainTextureTileg: 'tileg（map/tileg）',
+    infiniteMapTerrainTextureTiler: 'tiler（map/tiler）',
     infiniteMapCityGenSection:
       '小镇生成：围栏矩形由东西/南北栏段数与固定步长推导（东西 Z 间距 31、南北 X 间距 34），Z 中心 290；草地列行与点缀数量随围栏内陆范围缩放；整镇随机落在可走平地（非水非山）。',
     infiniteMapCityGenSeed: '生成种子',
@@ -1170,6 +1174,10 @@ export const locales: Record<Lang, Record<string, string>> = {
     infiniteMapMonsterCount: 'Monster count',
     infiniteMapRandomMap: 'Randomize map',
     infiniteMapRandomTownPlace: 'Random town spot (flat snow)',
+    infiniteMapTerrainTextureSet: 'Terrain texture set',
+    infiniteMapTerrainTextureBlob: 'Default (map/blob)',
+    infiniteMapTerrainTextureTileg: 'tileg (map/tileg)',
+    infiniteMapTerrainTextureTiler: 'tiler (map/tiler)',
     infiniteMapCityGenSection:
       'Town layout: fence from EW/NS segment counts (Z step 31, X step 34), Z center 290; grass/prop counts scale with fenced interior; placed on walkable flat (no water/mtn).',
     infiniteMapCityGenSeed: 'Layout seed',
@@ -2263,6 +2271,10 @@ export const locales: Record<Lang, Record<string, string>> = {
     infiniteMapMonsterCount: 'モンスター数',
     infiniteMapRandomMap: 'マップをランダム生成',
     infiniteMapRandomTownPlace: '町の位置をランダム（平地の雪）',
+    infiniteMapTerrainTextureSet: '地形テクスチャセット',
+    infiniteMapTerrainTextureBlob: '既定（map/blob）',
+    infiniteMapTerrainTextureTileg: 'tileg（map/tileg）',
+    infiniteMapTerrainTextureTiler: 'tiler（map/tiler）',
     infiniteMapCityGenSection:
       '町：柵は東西/南北の段数と固定ステップ（Z 31、X 34）、Z 中心 290 で決まる；草地・小物は柵内の広さに比例；全体を歩行可の平地に配置。',
     infiniteMapCityGenSeed: '生成シード',

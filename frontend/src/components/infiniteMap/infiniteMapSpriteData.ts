@@ -1,9 +1,20 @@
 /**
- * 与 ControlTest topdown 相同的精灵表切帧数据（本模块独立副本，不引用 ControlTest）。
+ * @fileoverview 无限地图玩家角色：精灵表切帧元数据。
+ *
+ * ## 来源
+ * 与 ControlTest topdown 使用同一套 `TINA.png` 布局；此处为 **独立副本**，避免与 ControlTest 模块循环依赖。
+ *
+ * ## 约定
+ * - `REGIONS` 的键名为历史/工具生成的短 id，与 `ANIMS[].frames` 一一对应。
+ * - 每个区域为源图上的像素矩形 `(x,y,w,h)`；`extractFrame` 裁到独立小 Canvas 供每帧绘制。
+ * - `ANIMS`：`speed` 与 `InfiniteMapScene` 中 `accum` 逻辑配合，数值越大切帧越快。
  */
 export const DEFAULT_CHAR_URL = `${import.meta.env.BASE_URL}map/TINA.png`
 
-/** 仅含行走/跑步/待机所需区域 */
+/**
+ * 源图 `TINA.png` 上的帧矩形（像素坐标，左上为原点）。
+ * 键名无语义，仅作稳定引用。
+ */
 export const REGIONS: Record<string, { x: number; y: number; w: number; h: number }> = {
   '72hcl': { x: 210, y: 126, w: 21, h: 42 },
   rydce: { x: 189, y: 126, w: 21, h: 42 },
@@ -46,6 +57,10 @@ export const REGIONS: Record<string, { x: number; y: number; w: number; h: numbe
   '876dv': { x: 231, y: 42, w: 21, h: 42 },
 }
 
+/**
+ * 动画状态机列表：`name` 与键盘推导的下一状态名对应；
+ * `frames` 为 `REGIONS` 键序列；`loop` 为 false 时播完停在最后一帧（本场景未用非循环跑走）。
+ */
 export const ANIMS: { name: string; frames: string[]; loop: boolean; speed: number }[] = [
   { name: 'idleL', frames: ['72hcl'], loop: true, speed: 5 },
   { name: 'idledown', frames: ['rydce'], loop: true, speed: 5 },
@@ -58,6 +73,9 @@ export const ANIMS: { name: string; frames: string[]; loop: boolean; speed: numb
   { name: 'walkup', frames: ['umveo', 'v6ado', 'syfy0', 'us0w8', 'pf2m2', '876dv'], loop: true, speed: 5 },
 ]
 
+/**
+ * 从整张贴图裁出一帧到透明背景小 Canvas（尺寸 = 区域 wh）。
+ */
 export function extractFrame(img: HTMLImageElement, key: string): HTMLCanvasElement | null {
   const r = REGIONS[key]
   if (!r) return null
