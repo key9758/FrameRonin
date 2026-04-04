@@ -33,6 +33,10 @@ export default function CropPreview({
   allowNegative = false,
 }: CropPreviewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const onImageSizeRef = useRef(onImageSize)
+  onImageSizeRef.current = onImageSize
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null)
   const [drag, setDrag] = useState<{
     handle: DragHandle
@@ -46,15 +50,25 @@ export default function CropPreview({
   } | null>(null)
 
   useEffect(() => {
+    let cancelled = false
     const img = new Image()
     img.onload = () => {
+      if (cancelled) return
       const size = { w: img.naturalWidth, h: img.naturalHeight }
       setImgSize(size)
-      onImageSize?.(size.w, size.h)
+      onImageSizeRef.current?.(size.w, size.h)
     }
-    img.onerror = () => setImgSize(null)
+    img.onerror = () => {
+      if (!cancelled) setImgSize(null)
+    }
     img.src = imageUrl
-  }, [imageUrl, onImageSize])
+    return () => {
+      cancelled = true
+      img.onload = null
+      img.onerror = null
+      img.src = ''
+    }
+  }, [imageUrl])
 
   const getDisplayRect = useCallback(() => {
     if (!imgSize) return null
@@ -148,7 +162,7 @@ export default function CropPreview({
           break
         }
       }
-      onChange({ top, bottom, left, right })
+      onChangeRef.current({ top, bottom, left, right })
     }
     const onUp = () => setDrag(null)
     window.addEventListener('mousemove', onMove)
@@ -157,7 +171,7 @@ export default function CropPreview({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [drag, imgSize, onChange])
+  }, [drag, imgSize])
 
   if (!imgSize) {
     return (

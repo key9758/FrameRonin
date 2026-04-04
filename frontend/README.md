@@ -15,11 +15,12 @@ npm run dev
 
 | 路径 | 说明 |
 |------|------|
-| `src/App.tsx` | 路由式模块切换、**全局快捷键**（B/C/V/G/R）、RoninPro 深链 |
+| `src/App.tsx` | 路由式模块切换、**全局快捷键**（B/C/V/G/R/N）、RoninPro 深链 |
 | `src/components/ModeSelector.tsx` | 首页模块卡片与顺序 |
 | `src/config/features.ts` | **功能开关**（如 `RONIN_PRO_REQUIRE_NFT`） |
 | `src/i18n/` | 文案与语言上下文 |
 | `src/components/*.tsx` | 各功能模块（GIF、Sprite Sheet、RoninPro 等） |
+| `src/components/SpriteSheetAdjust.tsx` | 精灵表调整；RoninPro **单图调整 Pro**（切块 N×M 与预览排列分离，见根目录 README） |
 
 ## 开发与发布注意
 

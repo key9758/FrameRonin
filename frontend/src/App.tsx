@@ -79,7 +79,7 @@ function App() {
   const { lang, setLang, t } = useLanguage()
   const [gemToken, setGemToken] = useState(() => getGemToken())
   const [mode, setMode] = useState<AppMode>(null)
-  /** 首页快捷键：R/T RoninPro 子模块、S → Sprite Sheet 调整等 */
+  /** 首页快捷键：R/T/N → RoninPro 子模块、S → Sprite Sheet 调整等 */
   const [roninProDeepLink, setRoninProDeepLink] = useState<string | null>(null)
   const consumeRoninProDeepLink = useCallback(() => setRoninProDeepLink(null), [])
   const [imageSubMode, setImageSubMode] = useState<ImageSubMode | 'select'>('select')
@@ -132,7 +132,7 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [mode])
 
-  /** 首页按 C 进入 GIF ↔ 序列帧模块 */
+  /** 首页按 C 进入 gif、帧排序、合并模块 */
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (mode !== null) return
@@ -185,6 +185,24 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [mode])
 
+  /** 首页按 N 进入 RoninPro → 单图调整 Pro */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (mode !== null) return
+      if (e.code !== 'KeyN') return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const el = document.activeElement
+      const tag = el?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      if (el instanceof HTMLElement && el.isContentEditable) return
+      e.preventDefault()
+      setRoninProDeepLink('sheetPro')
+      setMode('roninPro')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [mode])
+
   /** 首页按 G 进入 Gemini 水印去除 */
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -202,7 +220,7 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [mode])
 
-  /** 首页按 V 进入像素图片处理 */
+  /** 首页按 V 进入一键/精细像素图处理 */
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (mode !== null) return

@@ -24,6 +24,7 @@ import RoninProCustomWorkflow from './RoninProCustomWorkflow'
 import RoninProNftClaim from './RoninProNftClaim'
 import RoninProRseprite from './RoninProRseprite'
 import RoninProDuplicateFrames from './RoninProDuplicateFrames'
+import RoninProSheetPro from './RoninProSheetPro'
 
 const ACCENT = '#b55233'
 const ICON_BOX = 44
@@ -105,7 +106,12 @@ export default function RoninPro({
     onDeepLinkConsumed?.()
   }, [deepLinkFeature, onDeepLinkConsumed])
 
-  if (!isConnected) {
+  /** 单图调整 Pro：仅首页快捷键 N 进入；首帧深链尚未写入 state 时也要能显示 */
+  const displayedFeature = deepLinkFeature === 'sheetPro' ? 'sheetPro' : activeFeature
+  /** 该子模块不对登录 / NFT 做限制（与 RoninPro 其余功能区分） */
+  const skipRoninGate = displayedFeature === 'sheetPro'
+
+  if (!skipRoninGate && !isConnected) {
     return (
       <div style={{ padding: 24 }}>
         {onBack && (
@@ -124,7 +130,7 @@ export default function RoninPro({
     )
   }
 
-  if (RONIN_PRO_REQUIRE_NFT && ownsNft === false) {
+  if (!skipRoninGate && RONIN_PRO_REQUIRE_NFT && ownsNft === false) {
     return (
       <div style={{ padding: 24 }}>
         {onBack && (
@@ -143,7 +149,7 @@ export default function RoninPro({
     )
   }
 
-  if (RONIN_PRO_REQUIRE_NFT && ownsNft === null) {
+  if (!skipRoninGate && RONIN_PRO_REQUIRE_NFT && ownsNft === null) {
     return (
       <div style={{ padding: 24 }}>
         {onBack && (
@@ -162,7 +168,7 @@ export default function RoninPro({
 
   /** 自定义流程蓝图需要更大画布：接近视口宽；其它子页保持常规宽度 */
   const shellMaxWidth =
-    activeFeature === 'customWorkflow' || activeFeature === 'rseprite'
+    displayedFeature === 'customWorkflow' || displayedFeature === 'rseprite' || displayedFeature === 'sheetPro'
       ? 'min(calc(100vw - 40px), 1920px)'
       : 1200
 
@@ -178,14 +184,14 @@ export default function RoninPro({
     >
       <div
         style={{
-          marginBottom: activeFeature ? 16 : 20,
+          marginBottom: displayedFeature ? 16 : 20,
           display: 'flex',
           alignItems: 'center',
           gap: 8,
           flexWrap: 'wrap',
         }}
       >
-        {activeFeature ? (
+        {displayedFeature ? (
           <Button
             type="text"
             icon={<ArrowLeftOutlined />}
@@ -203,7 +209,7 @@ export default function RoninPro({
         </Typography.Title>
       </div>
 
-      {!activeFeature ? (
+      {!displayedFeature ? (
         <div>
           <Typography.Paragraph
             type="secondary"
@@ -299,21 +305,23 @@ export default function RoninPro({
             ))}
           </Row>
         </div>
-      ) : activeFeature === 'customSlice' ? (
+      ) : displayedFeature === 'customSlice' ? (
         <RoninProCustomSlice />
-      ) : activeFeature === 'customScale' ? (
+      ) : displayedFeature === 'customScale' ? (
         <RoninProCustomScale />
-      ) : activeFeature === 'unifySize' ? (
+      ) : displayedFeature === 'unifySize' ? (
         <RoninProUnifySize />
-      ) : activeFeature === 'duplicateFrames' ? (
+      ) : displayedFeature === 'duplicateFrames' ? (
         <RoninProDuplicateFrames />
-      ) : activeFeature === 'customWorkflow' ? (
+      ) : displayedFeature === 'sheetPro' ? (
+        <RoninProSheetPro />
+      ) : displayedFeature === 'customWorkflow' ? (
         <RoninProCustomWorkflow onSendToFineProcess={onSendToFineProcess} />
-      ) : activeFeature === 'advancedPixel' ? (
+      ) : displayedFeature === 'advancedPixel' ? (
         <RoninProAdvancedPixel />
-      ) : activeFeature === 'nftClaim' ? (
+      ) : displayedFeature === 'nftClaim' ? (
         <RoninProNftClaim />
-      ) : activeFeature === 'rseprite' ? (
+      ) : displayedFeature === 'rseprite' ? (
         <RoninProRseprite />
       ) : null}
     </div>

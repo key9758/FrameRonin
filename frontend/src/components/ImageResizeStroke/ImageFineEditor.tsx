@@ -6,6 +6,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  EyeOutlined,
   InboxOutlined,
   UndoOutlined,
 } from '@ant-design/icons'
@@ -14,7 +15,7 @@ import { useImageStash } from '../../stash/context'
 
 const { Text } = Typography
 
-type Tool = 'brush' | 'eraser' | 'superEraser' | 'selectMove'
+type Tool = 'brush' | 'eraser' | 'superEraser' | 'selectMove' | 'eyedropper'
 
 type SelRect = { x: number; y: number; w: number; h: number }
 
@@ -102,6 +103,17 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d}" height="${d}" viewBox="0 0 ${d} ${d}"><circle cx="${r}" cy="${r}" r="${r - 1}" fill="none" stroke="#333" stroke-width="2"/></svg>`
     return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") ${r} ${r}, cell`
   }, [eraserSize, displayScale])
+
+  const eyedropperCursor = useCallback(() => {
+    // 简单显示器滴管形状；精细指针不追求像素完美，仅提示工具状态
+    const d = Math.min(128, Math.max(2, Math.ceil(brushSize * displayScale)))
+    const r = d / 2
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d}" height="${d}" viewBox="0 0 ${d} ${d}">
+      <path d="M ${r} ${r - d * 0.25} L ${r + d * 0.18} ${r - d * 0.43} L ${r + d * 0.05} ${r - d * 0.30} Z" fill="#b55233" stroke="#63321f" stroke-width="1"/>
+      <circle cx="${r}" cy="${r}" r="${Math.max(1, r - 1)}" fill="none" stroke="#333" stroke-width="2"/>
+    </svg>`
+    return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") ${r} ${r}, cell`
+  }, [brushSize, displayScale])
 
   useEffect(() => {
     if (!imageUrl) {
@@ -412,6 +424,18 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
       if (e.button === 0) {
         const pt = screenToCanvas(e.clientX, e.clientY)
         if (pt) {
+          if (tool === 'eyedropper') {
+            const canvas = canvasRef.current
+            const ctx = canvas?.getContext('2d')
+            if (!ctx) return
+            const data = ctx.getImageData(pt.x, pt.y, 1, 1).data
+            const r = data[0]!
+            const g = data[1]!
+            const b = data[2]!
+            setBrushColor(`#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`)
+            switchTool('brush')
+            return
+          }
           if (tool === 'superEraser') {
             pushHistory()
             superEraserAt(pt.x, pt.y)
@@ -423,7 +447,7 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
         }
       }
     },
-    [imgSize, tool, screenToCanvas, canvasPxFromClient, drawAt, superEraserAt, pushHistory]
+    [imgSize, tool, screenToCanvas, canvasPxFromClient, drawAt, superEraserAt, pushHistory, switchTool]
   )
 
   const handlePointerMove = useCallback(
@@ -763,6 +787,13 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
             {t('imgFineEditorEraser')}
           </Button>
           <Button
+            type={tool === 'eyedropper' ? 'primary' : 'default'}
+            icon={<EyeOutlined />}
+            onClick={() => switchTool('eyedropper')}
+          >
+            {t('imgFineEditorEyedropper')}
+          </Button>
+          <Button
             type={tool === 'superEraser' ? 'primary' : 'default'}
             icon={<AimOutlined />}
             onClick={() => switchTool('superEraser')}
@@ -859,6 +890,8 @@ export default function ImageFineEditor({ imageUrl, onExport }: ImageFineEditorP
                 ? moveDrag
                   ? 'move'
                   : 'crosshair'
+                : tool === 'eyedropper'
+                  ? eyedropperCursor()
                 : tool === 'brush' || tool === 'superEraser'
                   ? 'crosshair'
                   : tool === 'eraser'

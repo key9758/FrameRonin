@@ -8,8 +8,9 @@ Pixel image and frame sequence toolset: video frame extraction, GIF processing, 
 
 ## What's New in V3
 
-- **Global shortcuts (home / in-feature)**: On home, **C** opens GIF↔Frames, **V** Pixel Image Processing, **G** Gemini watermark removal, **R** RoninPro → **Custom Scale**; from any main feature, **B** returns home (ignored when an input/textarea/contenteditable is focused or with Ctrl/Cmd/Alt). See **Web Shortcuts** below.
-- **RoninPro**: Custom scale, custom slice, unify size, and more; NFT gate is controlled by `RONIN_PRO_REQUIRE_NFT` in `frontend/src/config/features.ts` (default: no NFT required); **R** deep-links to Custom Scale.
+- **Global shortcuts (home / in-feature)**: On home, **C** opens GIF↔Frames, **V** Pixel Image Processing, **G** Gemini watermark removal, **R** RoninPro → **Custom Scale**, **N** RoninPro → **Sheet Pro** (split + sprite sheet adjust); from any main feature, **B** returns home (ignored when an input/textarea/contenteditable is focused or with Ctrl/Cmd/Alt). See **Web Shortcuts** below.
+- **RoninPro**: Custom scale, custom slice, unify size, and more; NFT gate is controlled by `RONIN_PRO_REQUIRE_NFT` in `frontend/src/config/features.ts` (default: no NFT required); **R** deep-links to Custom Scale; **N** deep-links to Sheet Pro.
+- **Sheet Pro** (RoninPro, shortcut **N**): On **uniform grid**, **N×M** only defines how the full image is split (changing it re-splits). The preview **column count** only controls frames per row and the merge/export layout—it does **not** re-split the source. Also: grid split, transparency-gap split, optional pre-process, per-frame nudge and edge crop, merge, ZIP / GIF export.
 - **Home layout**: RoninPro row is placed **above** Seedance watermark removal and asset/source sharing.
 - **GIF ↔ Frames**: Default tab is **multi-image merge to single**; default input mode is **split single image** (grid split then merge).
 - **Sprite Sheet Adjust**: Animation preview uses arrow buttons; **A / D** step through selected frames (when not typing); **recombine** exports sheet after per-frame offsets.
@@ -43,7 +44,7 @@ Pixel image and frame sequence toolset: video frame extraction, GIF processing, 
 - **nanob Full Character Action Test**: V4Tx3 continuous actions, etc.
 
 ### RoninPro (efficiency)
-- **RoninPro** (Ronin login): **Custom Scale**, **Custom Slice**, **Unify Size**, etc. NFT requirement: see `frontend/src/config/features.ts`.
+- **RoninPro** (Ronin login): **Custom Scale**, **Custom Slice**, **Unify Size**, **Sheet Pro**, etc. NFT requirement: see `frontend/src/config/features.ts`. In **Sheet Pro**, the split grid (N×M) and the preview/composite layout are separate: N/M re-cut the image; changing preview columns only reflows.
 
 ### Demo / experimental
 - **Top-down Test Scene**, **Arcade Test Scene**: Control and layering experiments (not the main production pipeline).
@@ -56,6 +57,7 @@ Pixel image and frame sequence toolset: video frame extraction, GIF processing, 
 
 - **V**: On the **home** screen, open **Pixel Image Processing** (entry picker; same focus/modifier rules as below).
 - **R**: On the **home** screen, open **RoninPro → Custom Scale** (Ronin login required; NFT gate applies if enabled; same focus/modifier rules as below).
+- **N**: On the **home** screen, open **RoninPro → Sheet Pro** (split + sprite sheet adjust; same login/NFT rules as **R**).
 - **G**: On the **home** screen, open **Gemini Watermark Removal** (same focus/modifier rules as below).
 - **C**: On the **home** screen, open **GIF ↔ Frames** (same as the card; same focus/modifier rules as below).
 - **B**: Return to home from any main feature. Ignored while focus is in an input, textarea, or contenteditable; also ignored with Ctrl / Cmd / Alt (avoids browser shortcuts). The video workflow resets the upload step; the image module returns to its entry selection screen.
