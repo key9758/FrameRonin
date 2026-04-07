@@ -173,3 +173,4 @@ docker-compose up -d
 | [DEV_PLAN_extensions.md](./DEV_PLAN_extensions.md) | 功能扩展规划与 V3 已落地项对照 |
 | [DEPLOY.md](./DEPLOY.md) | 推送、CNB/EdgeOne、部署注意事项 |
 | [frontend/README.md](./frontend/README.md) | 前端工程说明 |
+<!-- trigger deploy -->
